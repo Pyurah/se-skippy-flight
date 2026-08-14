@@ -35,15 +35,17 @@ two docking points (for example, a planet base and an orbital station).
 
 ## Install
 
-1. Paste [`SkippyShuttle.cs`](SkippyShuttle.cs) into the ship's Programmable Block and recompile.
-   On first run it writes a config template into the PB's **Custom Data**.
+1. Paste [`SkippyFlight.min.cs`](SkippyFlight.min.cs) into the ship's Programmable Block and
+   recompile. On first run it writes a config template into the PB's **Custom Data**.
 2. Edit the Custom Data (see below), then recompile again.
 3. Repeat for the base/station PB, but set `role = base`.
 
-> **Near the 100,000-char PB limit?** The commented source is close to the cap. Run
-> `python tools/build-min.py` to generate `SkippyShuttle.min.cs` — the same code with
-> comments and blank lines stripped (~36 % smaller) — and paste *that* into the PB instead.
-> Keep editing `SkippyShuttle.cs`; the min file is a generated artifact. (Note: in-game
+> **Paste the `.min.cs`, not the `.cs`.** The fully commented source
+> [`SkippyFlight.cs`](SkippyFlight.cs) is **129,602 chars** — over the 100,000-char PB limit —
+> so it won't compile in-game as-is. `python tools/build-min.py` generates
+> [`SkippyFlight.min.cs`](SkippyFlight.min.cs): the same code with comments and blank lines
+> stripped (~42 % smaller → **75,112 chars**, ~24.9 k under the cap). Keep editing
+> `SkippyFlight.cs`; the min file is a generated artifact, rebuilt on every change. (In-game
 > compile errors then report line numbers against the min file, not the source.)
 
 ## Custom Data (`[shuttle]` section)
