@@ -4,6 +4,18 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-08-14
+
+### Fixed
+- Undock no longer pitches the nose up hard before leveling off for cruise. The v0.2.1 fix aimed
+  the nose straight at the first cruise waypoint; when that waypoint climbs (destination up-and-over
+  a hill) the ship pitched up steeply to point at it, then cruise's level-flight law dropped the
+  nose back to horizontal the instant it engaged — a visible pitch-up/level-off flip. Undock now
+  pre-aims the *same* attitude cruise will hold: in level flight (in gravity, up-thrust dominant)
+  it faces the horizontal heading with up away from gravity, so the handoff is seamless. Nose-
+  forward flight (space, or up-thrust-poor craft) keeps the direct-facing behavior from 0.2.1,
+  including the orthogonalized up that prevents the 45s undock stall.
+
 ## [0.2.1] - 2026-08-14
 
 ### Fixed

@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.2.1";
+const string VERSION = "0.2.2";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -894,15 +894,32 @@ void TickUndock()
         Vector3D toTarget = FirstCruiseTarget(fromHome) - standoff;
         if (toTarget.LengthSquared() > 1)
         {
-            faceFwd = Vector3D.Normalize(toTarget);
-            // Keep the target up perpendicular to the (possibly steeply pitched)
-            // facing. Pairing a pitched forward with the near-vertical recorded
-            // dock up is a pose the gyros can't satisfy, so AlignTo would never
-            // fall under ALIGN_TOL and undock would stall to the 45s timeout -
-            // most visible on a sparse route whose first cruise target is the far,
-            // low approach point (nose ends up aimed at the ground).
-            Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
-            if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+            Vector3D dir = Vector3D.Normalize(toTarget);
+            Vector3D grav = rc.GetNaturalGravity();
+            if (grav.LengthSquared() > 1e-3 && UseLevelFlight())
+            {
+                // Pre-aim the exact attitude level-flight cruise will hold: nose on
+                // the HORIZONTAL heading, up away from gravity. A climbing first
+                // waypoint (dest up-and-over a hill) sits above the stand-off, so
+                // aiming the nose straight at it would pitch up hard - only for cruise
+                // to level off the instant it engages. Matching cruise's attitude here
+                // removes that pitch-up/level-off flip and hands off seamlessly.
+                Vector3D upWorld = Vector3D.Normalize(-grav);
+                Vector3D horiz = dir - dir.Dot(upWorld) * upWorld;
+                if (horiz.LengthSquared() > 1e-6) faceFwd = Vector3D.Normalize(horiz);
+                faceUp = upWorld;
+            }
+            else
+            {
+                // Nose-forward flight (space, or up-thrust-poor craft): face the target
+                // directly, but keep the target up perpendicular to the (possibly
+                // pitched) facing. Pairing a pitched forward with the near-vertical
+                // recorded dock up is a pose the gyros can't satisfy, so AlignTo would
+                // never fall under ALIGN_TOL and undock would stall to the 45s timeout.
+                faceFwd = dir;
+                Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
+                if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+            }
         }
     }
 

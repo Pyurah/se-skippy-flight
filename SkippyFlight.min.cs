@@ -1,4 +1,4 @@
-const string VERSION = "0.2.1";
+const string VERSION = "0.2.2";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -611,9 +611,21 @@ void TickUndock()
         Vector3D toTarget = FirstCruiseTarget(fromHome) - standoff;
         if (toTarget.LengthSquared() > 1)
         {
-            faceFwd = Vector3D.Normalize(toTarget);
-            Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
-            if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+            Vector3D dir = Vector3D.Normalize(toTarget);
+            Vector3D grav = rc.GetNaturalGravity();
+            if (grav.LengthSquared() > 1e-3 && UseLevelFlight())
+            {
+                Vector3D upWorld = Vector3D.Normalize(-grav);
+                Vector3D horiz = dir - dir.Dot(upWorld) * upWorld;
+                if (horiz.LengthSquared() > 1e-6) faceFwd = Vector3D.Normalize(horiz);
+                faceUp = upWorld;
+            }
+            else
+            {
+                faceFwd = dir;
+                Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
+                if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+            }
         }
     }
     bool ready = FlyToPose(standoff, faceFwd, faceUp, 1.0) && clear;
