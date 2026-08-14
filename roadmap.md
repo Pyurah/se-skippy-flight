@@ -7,17 +7,25 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.9.0 (Slice e delivered — **tower clearance, shuttle side**: an optional
-  traffic-control overlay on the two clearance gates a ship already runs locally. With `useTower`
-  on and a tower broadcasting a `CMD|TOWER` heartbeat, the ship requests clearance (`CMD|REQ`) and
-  holds at the `Loading/Unloading → Undock` and `Holding → Taxi` commits until the tower grants
-  (`CMD|CLEAR`) — denials (`CMD|HOLD`) surface a reason. All verbs are additive on the existing IGC
-  channel; the `CMD|DEPART` override still departs instantly. Default `Off` is byte-identical to
-  before, and even `Auto` flies independently until a live tower is actually heard — if the tower
-  goes silent past `TOWER_TIMEOUT` the ship reverts to independent operation (anti-stranding). All
-  handshake state is ephemeral. The tower PB itself is Slice f. Built on Slice d's altitude-trend
-  `Climb → Cruise → Descent` boundaries for same-planet legs; Slice c's scenario-aware cruise;
-  Slice b's `DepartStaging`/`Holding`/`Taxi` phases with derived stand-off fixes and the local
+- **Version:** 0.11.0 (Slice g delivered — **manual approval mode for SkippyTower.cs**: an
+  air-traffic-controller option layered on the Slice f tower. `grant = auto | manual` (persisted;
+  toggled at runtime via the `MANUAL`/`AUTO` PB commands) switches the control-mode tower between
+  auto-granting the best waiting craft every tick and holding all traffic for hand approval. The
+  operator clears with `CLEAR` (best of queue), `CLEAR <ship>` (queue-jump by name), or force-frees a
+  stuck slot with `RELEASE`; the board shows `CONTROL/AUTO`|`CONTROL/MANUAL`, a `|| WAITING (your OK)`
+  tag, and a `Next: … - run CLEAR` footer. The heartbeat beats in both sub-modes so a held ship never
+  reverts to independent, and auto slot-release stays on for anti-deadlock. `SkippyFlight.cs` is
+  unchanged — stays 0.10.0; a manual `CMD|CLEAR` is byte-identical to an auto one, so the fleet
+  interoperates by wire protocol, not version. Built on Slice f's active traffic-control tower that
+  answers the Slice e handshake. A separate PB script that emits the `CMD|TOWER` heartbeat, consumes
+  `CMD|REQ`, and **serializes clearances so only one craft maneuvers at the station at a time**
+  (`CMD|CLEAR`/`CMD|HOLD`), a waiting `LAND` served before a waiting `DEPART`. It reads the unchanged
+  status report to know every ship's phase, holds the single slot from grant until the ship clears
+  the resource, and releases on an anti-deadlock timeout if a cleared ship is lost or aborts. A
+  `control|board` toggle also runs it as a plain passive status board.
+  Built on Slice e's shuttle-side overlay on the two clearance gates a ship runs locally; Slice d's
+  altitude-trend `Climb → Cruise → Descent` boundaries for same-planet legs; Slice c's scenario-aware
+  cruise; Slice b's `DepartStaging`/`Holding`/`Taxi` phases with derived stand-off fixes and the local
   clearance gate; and Slice a's phase-object base controller, multiple named routes, and telemetry
   debug view. Block tags and Custom Data sections are keyed to `SF`.)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
@@ -396,21 +404,70 @@ is a no-op, so this slice ships without regression.
 - [x] Rebuild + budget check (`python tools/build-min.py`): stripped **97,498 chars**
       (2,502 headroom, +2,261 vs 0.8.1), braces balanced 507/507.
 
-### Slice f — SkippyTower.cs
+### Slice f — SkippyTower.cs ✅ (v0.10.0)
 
-The control tower as its own script (own char budget), speaking the Slice-e protocol. Extends the
-existing passive base/board role into an active-control mode:
+The control tower as its own script (own char budget), speaking the Slice-e protocol. A superset of
+the passive base/board role with an active-control mode. **Scope delivered: minimal core** — a single
+global slot; dynamic pad-bank + `pose` assignment deferred (the `pose` field stays reserved).
 
-- Emits the `CMD|TOWER|<zone>` heartbeat on an interval — the presence signal that flips ships from
-  independent to controlled.
-- Consumes the existing status reports (it already builds the `fleet` table) plus incoming
-  `CMD|REQ`; **serializes grants** so only one craft occupies the corridor/pad at a time, issuing
-  `CMD|CLEAR` / `CMD|HOLD` with an optional reason. Ship side is oblivious — it just waits for its
-  addressed grant.
+- [x] Emits the `CMD|TOWER|<zone>` heartbeat every `HEARTBEAT_SEC` (2 s) in control mode — the
+      presence signal that flips ships from independent to controlled.
+- [x] Consumes the existing status reports (builds the same `fleet` table) plus incoming `CMD|REQ`;
+      **serializes grants** so only one craft occupies the corridor/pad at a time, issuing
+      `CMD|CLEAR` / `CMD|HOLD|…|traffic`. A waiting `LAND` outranks a waiting `DEPART`, else FIFO.
+      Ship side is oblivious — it just waits for its addressed grant.
+- [x] Slot held from grant until the granted ship's own status shows it cleared the resource
+      (`DEPART` → cruise-family; `LAND` → docked), with anti-deadlock release on lost signal,
+      `Faulted`/`Idle`, or `GRANT_MAX_SEC` (180 s). No persisted state — the fleet table and queue
+      are rebuilt live from broadcasts.
+- [x] `towerMode` toggle (`control` / `board`): `board` runs it as a plain status board with **no
+      heartbeat**, so the fleet stays independent — a drop-in for a `role=base` board.
+- [x] Board render scoped to `IsSameConstructAs(Me.CubeGrid)` (fixed post-delivery): a docked
+      shuttle's own `[SF]` LCDs are no longer hijacked when the connector merges terminal systems.
+      Same fix applied to `SkippyFlight.cs` `RunBase`, which had the identical bug.
+- [x] Board render: base-board layout + mode line + per-ship `> CLEARED`/`|| HOLD` tag + slot footer.
+- [x] `tools/build-min.py` extended to build **both** scripts, each against its own 100k budget.
+- [x] Rebuild + budget check: `SkippyTower.min.cs` **8,079 chars (91,921 headroom)**, braces balanced
+      (41/41). `SkippyFlight.min.cs` **97,544 chars (2,456 headroom)**, braces balanced (507/507).
+      Both scripts → 0.10.0.
+- [ ] In-world validation (needs a live tower): board mode = independent; control single-ship
+      grant at both gates; two-ship contention (`LAND` preferred, other shows "HOLD: traffic");
+      anti-deadlock release; tower-death revert (also proves the deferred **Slice e** edge cases,
+      which required a live tower to exercise).
+
+#### Deferred (pad bank)
 - Pad registry + slot scheduling for a shared bank; optional `pose` in `CMD|CLEAR` assigns a
-  dynamic pad (pairs with the "Tower-assigned fixes" note under *Staging & holding fixes*).
-- A control-mode toggle so the same block can run as a plain status board (no heartbeat → fleet
-  stays independent) or an active controller.
+  dynamic pad (pairs with the "Tower-assigned fixes" note under *Staging & holding fixes*). Requires
+  tower pad-pose config and ship-side dynamic-pose handling beyond Slice e.
+
+### Slice g — Manual approval mode ✅ (v0.11.0)
+
+An air-traffic-controller sub-mode on the Slice f tower: the operator "mans" the tower to approve each
+clearance by hand, or leaves it unmanned to auto-approve — flipped **at runtime**, not by editing
+Custom Data. All work is in `SkippyTower.cs` + docs; the shuttle side is untouched (a manual
+`CMD|CLEAR` is byte-identical to an auto one), so `SkippyFlight.cs` stays 0.10.0 (intentional skew).
+
+- [x] `grant = auto | manual` config key in `[sf]` (default `auto`; only meaningful in `control`,
+      ignored in `board`). New runtime `bool manual`, **persisted** to Custom Data on every toggle via
+      `SaveGrantMode()`, so it survives a recompile.
+- [x] `HandleCommand(argument)` at the top of `Main` (before the control tick, so a `CLEAR` lands the
+      same tick). Verbs: `MANUAL` / `AUTO` (toggle + persist), `CLEAR` (approve best of queue via
+      `ManualGrant(null)` → `GrantNext`), `CLEAR <ship>` (queue-jump by name, kept raw for spaces),
+      `RELEASE` (force-free the slot via `ClearSlot`, no 180 s wait).
+- [x] `Main` gate: `if (!manual) GrantNext();` — auto grants every tick, manual only on `CLEAR`.
+      `ReleaseIfDone()` and `Heartbeat()` run in **both** sub-modes (anti-deadlock release stays on; a
+      held ship never reverts to independent while the operator deliberates).
+- [x] Sub-mode-aware board: mode line `CONTROL/AUTO` | `CONTROL/MANUAL`; held-ship tag
+      `|| WAITING (your OK)` (manual) vs `|| HOLD (traffic)` (auto); footer `Next: <ship> (<action>) -
+      run CLEAR` when manual with a free slot and a waiting queue, else `Slot: …`/`Slot: free`.
+- [x] File header + `WriteSection`/`LoadConfig` document and round-trip the `grant` key; README tower
+      section extended with the key and the command table.
+- [x] Rebuild + budget check: `SkippyTower.min.cs` **9,807 chars (90,193 headroom)**, braces balanced
+      (50/50). `SkippyFlight.min.cs` unchanged at **97,544 chars (2,456 headroom)**, braces (507/507).
+      Tower → 0.11.0.
+- [ ] In-world validation: manual holds a finished-loading ship at `Awaiting tower - DEPART`; `CLEAR`
+      departs it and the slot auto-frees at cruise; `CLEAR <name>` queue-jumps; `AUTO` resumes
+      instant grants; `RELEASE` breaks a stuck slot; toggle survives recompile.
 
 ### Later
 

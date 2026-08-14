@@ -308,6 +308,57 @@ range of each other (see the range note above).
 > while the shuttle is out of range. Place a relay antenna near the midpoint for an unbroken
 > board — the shuttle still flies fine without signal; only the board blanks while out of range.
 
+## Control tower (`SkippyTower.cs`)
+
+For a station with more than one shuttle, `SkippyTower.cs` is a **separate** script that actively
+serializes traffic so only one craft maneuvers at the station at a time — no more two shuttles both
+undocking into, or both taxiing onto, the same corridor. It is a superset of the base board: it
+renders the same status list and, in control mode, clears traffic on top.
+
+**Install:** paste `SkippyTower.min.cs` into a station Programmable Block (its own block — not the
+same PB as a shuttle or a plain board), recompile once to seed the `[sf]` template, edit, recompile
+again. On the shuttle side, set each shuttle's `useTower = auto` (see the config table above) so it
+obeys the tower; a shuttle left at `off` ignores it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `channel` | `SkippyShuttleNet` | IGC channel; must match the fleet |
+| `zone` | `Main` | Label broadcast in the heartbeat (operator-facing; ships ignore the content) |
+| `lcdTag` | `[SF]` | Board is written to `Me`'s surface and every LCD whose name contains this tag |
+| `towerMode` | `control` | `control` = active tower (heartbeat + clearances); `board` = passive status board with **no heartbeat**, so the fleet stays independent (a drop-in for `role = base`) |
+| `grant` | `auto` | Control-mode sub-mode. `auto` = clear the best waiting craft automatically every tick; `manual` = hold all traffic until you approve each one by hand. Toggled at runtime (see commands below) and persisted here, so it survives a recompile. Ignored in `board` mode |
+
+**How clearance works:** the tower broadcasts a `CMD|TOWER` heartbeat; a shuttle running `useTower =
+auto` that hears it switches from independent to controlled and requests clearance before undocking
+and before taxiing onto a connector, holding until granted. The tower grants **one craft at a time**
+— a waiting landing is served before a waiting departure — and holds the slot until that craft has
+cleared the corridor (departed to cruise, or docked). If the tower is destroyed or unpowered, ships
+stop hearing the heartbeat and revert to independent operation within a few seconds, so a dead tower
+never strands the fleet. The board tags the cleared craft (`> CLEARED`) and any waiting one
+(`|| HOLD (traffic)`), with a `Slot:` footer.
+
+**Manual approval (be the controller):** by default the tower auto-approves. Set `grant = manual` (or
+run the `MANUAL` command) to "man" it — every request then holds, tagged `|| WAITING (your OK)`, and
+you approve each one by hand. Run these by typing the verb in the tower PB's **Run** argument (or bind
+it to a button/sensor); they only act in `control` mode:
+
+| Command | Effect |
+|---|---|
+| `MANUAL` | Take the controls — stop auto-granting; hold every request for your OK |
+| `AUTO` | Hand back — resume auto-granting the best waiting craft |
+| `CLEAR` | Approve the top of the queue (a landing before a departure, then oldest-first) |
+| `CLEAR <ship>` | Approve a specific waiting ship by name (queue-jump) |
+| `RELEASE` | Force-free the current slot now (deadlock breaker; skips the 180 s safety timeout) |
+
+The heartbeat keeps beating in both sub-modes, so a ship held for your approval stays controlled (it
+never reverts to independent while you deliberate); once you clear it and it departs or docks, the
+slot frees automatically and the next craft waits for your next `CLEAR`. The board's mode line reads
+`CONTROL/AUTO` or `CONTROL/MANUAL`, and while manual with a free slot the footer shows
+`Next: <ship> (<action>) - run CLEAR`.
+
+> The tower keeps no saved state — its fleet list and clearance queue rebuild live from broadcasts,
+> so a recompile mid-traffic simply re-establishes from the next round of reports and requests.
+
 ## Limitations (honest)
 
 - Uses **absolute world coordinates**. Correct for static grids (base + station). Do not use

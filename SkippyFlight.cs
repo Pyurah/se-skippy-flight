@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.9.0";
+const string VERSION = "0.10.0";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -3155,7 +3155,9 @@ void RunBase()
     var text = sb.ToString();
     Echo(text);
     var panels = new List<IMyTextPanel>();
-    GridTerminalSystem.GetBlocksOfType(panels, b => b.CustomName.Contains(lcdTag));
+    // Same-construct only: when a shuttle docks here the connector merges terminal
+    // systems, so an unscoped query would overwrite the visiting ship's own [SF] panels.
+    GridTerminalSystem.GetBlocksOfType(panels, b => b.CubeGrid.IsSameConstructAs(Me.CubeGrid) && b.CustomName.Contains(lcdTag));
     foreach (var p in panels) { p.ContentType = ContentType.TEXT_AND_IMAGE; p.WriteText(text); }
     Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
     Me.GetSurface(0).WriteText(text);

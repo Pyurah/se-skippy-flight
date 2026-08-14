@@ -1,4 +1,4 @@
-const string VERSION = "0.9.0";
+const string VERSION = "0.10.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -2188,7 +2188,7 @@ void RunBase()
     var text = sb.ToString();
     Echo(text);
     var panels = new List<IMyTextPanel>();
-    GridTerminalSystem.GetBlocksOfType(panels, b => b.CustomName.Contains(lcdTag));
+    GridTerminalSystem.GetBlocksOfType(panels, b => b.CubeGrid.IsSameConstructAs(Me.CubeGrid) && b.CustomName.Contains(lcdTag));
     foreach (var p in panels) { p.ContentType = ContentType.TEXT_AND_IMAGE; p.WriteText(text); }
     Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
     Me.GetSurface(0).WriteText(text);
