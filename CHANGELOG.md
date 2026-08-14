@@ -4,7 +4,41 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.7.0] - 2026-08-14
+## [0.8.0] - 2026-08-14
+
+Slice d — **environment sensing.** The `Climb → Cruise → Descent` stage boundaries for same-planet
+(**PlanetLocal**) legs now read the ship's real sea-level altitude trend instead of the coarse
+Slice-c distance proxies. The recorded waypoints already are the altitude plan — the operator flew
+the route — so the controller simply watches the altitude it's actually flying: Climb hands to
+Cruise when the climb levels off, and Cruise hands to Descent on a sustained sink toward the dock.
+Fully automatic; no new config. The Ascent/Descent (planet↔space) gravity boundaries are unchanged.
+
+### Added
+- **Altitude-trend PlanetLocal boundaries.** A new `TrySeaAlt` reader
+  (`TryGetPlanetElevation(Sealevel)`) feeds a per-tick vertical rate (`vRate`). Sea-level (not
+  surface/AGL) altitude is used so flying level over rising terrain is never mistaken for a descent.
+  Climb → Cruise fires once the ship is clear of the launch pad (`CLIMB_MIN_DIST`) and no longer
+  climbing (`vRate < LEVEL_RATE`); Cruise → Descent fires on a sustained sink (`vRate < -DESCENT_RATE`).
+  Both use the existing confirm dwell. A flat hop that never really climbs still hands to Cruise
+  (then Descent) via the distance guard — no dead-end in Climb.
+- **Handoff danger-zone marker.** The status/telemetry appends `!xfer` while the ship is in a
+  powered Climb/Descent inside a gravity well (the atmosphere/gravity thrust-handoff region).
+  Status-only — no change to speed or control law.
+
+### Changed
+- PlanetLocal Climb/Descent boundaries are now derived from the recorded altitude profile rather
+  than fixed 500 m distance gates. No behavior change for SpaceLocal, Ascent, or Descent legs, and
+  none felt on any route until a `climbSpeed`/`descentSpeed` cap is lowered by hand.
+
+### Removed
+- `PLANET_CLIMB_DIST` / `PLANET_DESCENT_DIST` constants (the Slice-c distance proxies), replaced by
+  the altitude-trend triggers.
+
+### Notes
+- Stripped size **94,451 chars** (5,549 headroom under the 100,000 limit, +1,014 vs 0.7.0), braces
+  balanced 493/493.
+
+
 
 Slice c — **flight plan + scenario.** The single cruise phase is now scenario-aware: each leg is
 classified from the two docks' recorded gravity into one of four scenarios, and the cruise splits

@@ -145,12 +145,14 @@ controller over the *same* recorded path — they differ only in an optional per
 | **SpaceLocal** | both docks in space | Cruise | — (identical to pre-0.7 behavior) |
 | **Ascent** | home in gravity, dest in space | Climb → Cruise | switches to Cruise once the ship clears the gravity well |
 | **Descent** | home in space, dest in gravity | Cruise → Descent | switches to Descent as the ship enters the gravity well |
-| **PlanetLocal** | both docks in the same gravity | Climb → Cruise → Descent | distance gates near departure and arrival (gravity barely changes within a planet) |
+| **PlanetLocal** | both docks in the same gravity | Climb → Cruise → Descent | reads the recorded altitude the ship is flying: switches to Cruise when the climb levels off, and to Descent on a sustained sink toward the dock |
 
-The stage boundaries in this release are a coarse gravity/distance proxy; precise altitude-based
-handoffs arrive in a later slice. Because both governor caps default to `cruiseSpeed`, climb and
-descent fly at the same speed as cruise out of the box — lower `descentSpeed` (for example) only
-when you want a gentler braked drop into a planet dock.
+The Ascent/Descent handoffs trigger on the gravity-well boundary; the PlanetLocal handoffs read the
+ship's real sea-level altitude trend (the recorded route already *is* the altitude plan, so there is
+nothing to configure). While climbing or descending inside a gravity well the status shows an
+`!xfer` marker for the atmosphere/gravity thrust handoff. Because both governor caps default to
+`cruiseSpeed`, climb and descent fly at the same speed as cruise out of the box — lower
+`descentSpeed` (for example) only when you want a gentler braked drop into a planet dock.
 
 ## Commands (run-argument on the ship PB)
 

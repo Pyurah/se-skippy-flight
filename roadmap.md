@@ -318,10 +318,28 @@ plan per scenario; add `Climb`/`Descent` phases (governor + status, reusing `Run
 - [x] Rebuild + budget check: **93,437 chars (6,563 headroom, +4,403 vs 0.6.0)**, braces balanced
       (488/488). Version → 0.7.0.
 
-### Slice d — environment sensing
+### Slice d — environment sensing ✅ (v0.8.0)
 
-Add altitude reader (`rc.TryGetPlanetElevation`); trigger Climb→Cruise→Descent boundaries and the
-handoff danger-zone status from gravity+altitude.
+Replaces the coarse Slice-c PlanetLocal distance proxies with a real altitude signal. The recorded
+waypoints already are the altitude plan, so the controller reads the altitude it is actually flying
+and detects the climb-out plateau and the descent to the dock. Fully automatic — no new config.
+
+- [x] Sea-level altitude reader `TrySeaAlt()` (`TryGetPlanetElevation(MyPlanetElevation.Sealevel)`),
+      feeding a per-tick vertical rate `vRate`. Sealevel (not Surface/AGL) so level flight over
+      rising terrain isn't read as a descent; returns false in space (gravity gates cover that).
+- [x] PlanetLocal boundaries in `BoundaryReady()`: **Climb → Cruise** when clear of the pad
+      (`CLIMB_MIN_DIST`) and no longer climbing (`vRate < LEVEL_RATE`), held `BOUNDARY_CONFIRM_SEC`;
+      **Cruise → Descent** on a sustained sink (`vRate < -DESCENT_RATE`), held `BOUNDARY_CONFIRM_SEC`.
+      Reuses the existing `boundaryFor` dwell and `legStartPos`; the distance guard degrades a flat
+      hop straight to Cruise (no dead-end in Climb). Ascent/Descent gravity boundaries unchanged.
+      Removed `PLANET_CLIMB_DIST`/`PLANET_DESCENT_DIST`; added `CLIMB_MIN_DIST`/`LEVEL_RATE`/`DESCENT_RATE`
+      (internal consts, not operator config).
+- [x] Handoff danger-zone: `InTransition()` (in a well + powered Climb/Descent) appends an `!xfer`
+      marker to the status/telemetry. Status-only; no control change. Derived, so resume-safe.
+- [x] New leg state (`prevSeaAlt`/`haveSeaAlt`/`vRate`) reset in `ArmCruise`; `CruisePhase.Enter`
+      now zeroes `boundaryFor` for a clean Cruise → Descent dwell. IGC wire unchanged.
+- [x] Rebuild + budget check: **94,451 chars (5,549 headroom, +1,014 vs 0.7.0)**, braces balanced
+      (493/493). Version → 0.8.0.
 
 ### Slice e — tower clearance (shuttle side)
 

@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.7.0";
+const string VERSION = "0.8.0";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -198,6 +198,7 @@ class CruisePhase : FlightPhase
     public override PhaseId Id { get { return PhaseId.Cruise; } }
     public override bool IsFlightControl { get { return true; } }
     public override string Label { get { return "Cruise"; } }
+    public override void Enter(Program p) { p.boundaryFor = 0; }   // fresh dwell for the Cruise->Descent boundary (shared accumulator)
     public override void Tick(Program p) { p.TickCruise(); }
 }
 
@@ -328,6 +329,9 @@ Leg leg;                         // current traversal context (Outbound = home->
 Scenario legScenario = Scenario.SpaceLocal;  // classified once per leg in ArmCruise; picks the cruise-family plan
 Vector3D legStartPos;            // ship position when the current leg armed; PlanetLocal Climb->Cruise distance gate origin
 public double boundaryFor = 0;   // s the current cruise-family gravity boundary has held (debounce accumulator; reset on phase Enter)
+double prevSeaAlt = 0;           // last tick's sea-level altitude [m]; basis for the vRate finite difference
+bool haveSeaAlt = false;         // false until the first valid sea-level reading this leg (skips the first-tick garbage rate; false in space)
+double vRate = 0;                // sea-level climb(+)/sink(-) rate [m/s]; drives the PlanetLocal Climb->Cruise->Descent boundaries
 Dictionary<PhaseId, FlightPhase> phases;   // one instance per phase, built in Program()
 bool operating = false;          // set by START, cleared by STOP / OneTrip end
 string statusMsg = "Idle";
@@ -443,11 +447,13 @@ const double VEL_DEADBAND = 0.4;          // m/s: velocity-tracking error below 
 // so Climb->Cruise lands precisely where coasting becomes available.
 const double GRAV_EPS = 1e-3;             // m/s^2: below this natural-gravity magnitude counts as space
 const double BOUNDARY_CONFIRM_SEC = 2.0;  // s the gravity boundary must hold before advancing (debounces sensor noise; the signal is monotonic across the boundary so no hysteresis band is needed)
-// PlanetLocal (grav<->grav same-planet) hops never cross GRAV_EPS - natural gravity barely
-// changes across the altitudes a shuttle flies - so their Climb->Cruise->Descent boundaries use
-// monotonic distance gates instead. Coarse Slice-c proxies; Slice d replaces both with altitude bands.
-const double PLANET_CLIMB_DIST = 500;     // m from the leg start before a PlanetLocal Climb hands to Cruise
-const double PLANET_DESCENT_DIST = 500;   // m remaining to the holding fix at which a PlanetLocal Cruise hands to Descent
+// PlanetLocal (grav<->grav same-planet) hops never cross GRAV_EPS - natural gravity barely changes
+// across the altitudes a shuttle flies - so their Climb->Cruise->Descent boundaries read the ship's
+// real sea-level altitude trend instead (the recorded waypoints ARE the altitude plan): Climb hands
+// to Cruise when the climb levels off; Cruise hands to Descent on a sustained sink to the dock.
+const double CLIMB_MIN_DIST = 100;        // m from the leg start before a "leveled off" reading can end a PlanetLocal Climb (guards the initial horizontal accel; also lets a flat hop hand straight to Cruise)
+const double LEVEL_RATE = 0.75;           // m/s: |sea-level climb rate| below this counts as leveled off (Climb -> Cruise)
+const double DESCENT_RATE = 1.5;          // m/s: sea-level sink rate beyond this counts as descending to the dock (Cruise -> Descent)
 
 // ---- Dock-clearance (anti-collision) tuning --------------------------------
 const double CLEAR_CONE_DOT = 0.70;       // cos(~45 deg): a camera must face this close to the dock direction for its raycast to be trusted (an out-of-cone ray silently reads empty, i.e. falsely "clear")
@@ -1213,7 +1219,18 @@ string CruiseStatus()
     bool toDest = leg.Outbound;
     string verb = phase == PhaseId.Climb ? "Climbing"
                 : phase == PhaseId.Descent ? "Descending" : "Cruising";
-    return verb + (toDest ? " to destination" : " home");
+    // Danger-zone marker: powered climb/descent while still inside a gravity well - the
+    // atmosphere/gravity thrust-handoff region. Status-only, no control change.
+    string xfer = InTransition() ? " !xfer" : "";
+    return verb + (toDest ? " to destination" : " home") + xfer;
+}
+
+// True in the atmosphere/gravity handoff: in a well (thrusters fighting gravity) and in a
+// powered Climb/Descent phase. Derived, not stored, so it's correct after a recompile/resume.
+bool InTransition()
+{
+    return rc != null && rc.GetNaturalGravity().Length() > GRAV_EPS
+           && (phase == PhaseId.Climb || phase == PhaseId.Descent);
 }
 
 // Scenario from the two ends' recorded gravity. > GRAV_EPS = in a gravity well.
@@ -1252,26 +1269,52 @@ PhaseId NextCruisePhase()
     return phase;
 }
 
+// Sea-level altitude [m] where a planet is beneath us; false (a=0) in space or with no controller.
+// Sea-level (not Surface/AGL) so flying level over rising terrain doesn't read as a descent.
+bool TrySeaAlt(out double a)
+{
+    a = 0;
+    return rc != null && rc.TryGetPlanetElevation(MyPlanetElevation.Sealevel, out a);
+}
+
 // Is the current cruise-family phase's advance trigger satisfied? Gravity crossings
-// (Ascent/Descent) use a confirm dwell; PlanetLocal uses monotonic distance gates because
-// natural gravity doesn't cross GRAV_EPS within a single planet. Slice d replaces the
-// distance gates with altitude bands.
+// (Ascent/Descent) use a confirm dwell on GRAV_EPS. PlanetLocal never crosses GRAV_EPS
+// within one planet, so it reads the sea-level altitude trend the ship is flying (the
+// recorded waypoints ARE the altitude plan): Climb -> Cruise when the climb levels off,
+// Cruise -> Descent on a sustained sink toward the dock.
 bool BoundaryReady()
 {
     if (rc == null) return false;
     double gMag = rc.GetNaturalGravity().Length();
 
+    // Sea-level climb(+)/sink(-) rate, refreshed every en-route tick so it's current wherever it's used.
+    double seaAlt;
+    bool onPlanet = TrySeaAlt(out seaAlt);
+    vRate = (onPlanet && haveSeaAlt && dt > 0) ? (seaAlt - prevSeaAlt) / dt : 0;
+    prevSeaAlt = seaAlt;
+    haveSeaAlt = onPlanet;
+
     if (phase == PhaseId.Climb)   // -> Cruise (Ascent, PlanetLocal)
     {
         if (legScenario == Scenario.PlanetLocal)
-            return Vector3D.Distance(rc.GetPosition(), legStartPos) > PLANET_CLIMB_DIST;
+        {
+            // Leveled off: clear of the initial horizontal accel and no longer climbing. The
+            // distance guard also lets a flat hop (no real climb) hand straight to Cruise.
+            bool level = Vector3D.Distance(rc.GetPosition(), legStartPos) > CLIMB_MIN_DIST
+                         && vRate < LEVEL_RATE;
+            boundaryFor = level ? boundaryFor + dt : 0;
+            return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+        }
         boundaryFor = gMag < GRAV_EPS ? boundaryFor + dt : 0;   // Ascent: left the well
         return boundaryFor >= BOUNDARY_CONFIRM_SEC;
     }
     if (phase == PhaseId.Cruise)  // -> Descent (Descent, PlanetLocal only)
     {
         if (legScenario == Scenario.PlanetLocal)
-            return RemainingDistance() < PLANET_DESCENT_DIST;
+        {
+            boundaryFor = vRate < -DESCENT_RATE ? boundaryFor + dt : 0;   // sustained sink to the dock
+            return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+        }
         if (legScenario == Scenario.Descent)
         {
             boundaryFor = gMag > GRAV_EPS ? boundaryFor + dt : 0;   // entered the well
@@ -1312,8 +1355,9 @@ void ArmCruise(bool toDest)
     }
     BuildVelocityProfile();
     legScenario = ClassifyLeg();          // pick the cruise-family plan for this leg/direction
-    legStartPos = rc.GetPosition();       // origin for the PlanetLocal Climb->Cruise distance gate
+    legStartPos = rc.GetPosition();       // origin for the PlanetLocal Climb->Cruise distance guard
     boundaryFor = 0;
+    prevSeaAlt = 0; haveSeaAlt = false; vRate = 0;   // fresh altitude trend for the PlanetLocal boundaries
     cruiseIdx = 0;
     cruiseProgTimer = 0;
     cruiseBestDist = double.MaxValue;

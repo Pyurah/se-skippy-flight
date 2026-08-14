@@ -1,4 +1,4 @@
-const string VERSION = "0.7.0";
+const string VERSION = "0.8.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -90,6 +90,7 @@ class CruisePhase : FlightPhase
     public override PhaseId Id { get { return PhaseId.Cruise; } }
     public override bool IsFlightControl { get { return true; } }
     public override string Label { get { return "Cruise"; } }
+    public override void Enter(Program p) { p.boundaryFor = 0; }
     public override void Tick(Program p) { p.TickCruise(); }
 }
 class ClimbPhase : FlightPhase
@@ -193,6 +194,9 @@ Leg leg;
 Scenario legScenario = Scenario.SpaceLocal;
 Vector3D legStartPos;
 public double boundaryFor = 0;
+double prevSeaAlt = 0;
+bool haveSeaAlt = false;
+double vRate = 0;
 Dictionary<PhaseId, FlightPhase> phases;
 bool operating = false;
 string statusMsg = "Idle";
@@ -266,8 +270,9 @@ const double CRUISE_COAST_BAND = 5.0;
 const double VEL_DEADBAND = 0.4;
 const double GRAV_EPS = 1e-3;
 const double BOUNDARY_CONFIRM_SEC = 2.0;
-const double PLANET_CLIMB_DIST = 500;
-const double PLANET_DESCENT_DIST = 500;
+const double CLIMB_MIN_DIST = 100;
+const double LEVEL_RATE = 0.75;
+const double DESCENT_RATE = 1.5;
 const double CLEAR_CONE_DOT = 0.70;
 const double CLEAR_CONFIRM_SEC = 1.5;
 const double STAGE_CONFIRM_SEC = 1.5;
@@ -823,7 +828,13 @@ string CruiseStatus()
     bool toDest = leg.Outbound;
     string verb = phase == PhaseId.Climb ? "Climbing"
                 : phase == PhaseId.Descent ? "Descending" : "Cruising";
-    return verb + (toDest ? " to destination" : " home");
+    string xfer = InTransition() ? " !xfer" : "";
+    return verb + (toDest ? " to destination" : " home") + xfer;
+}
+bool InTransition()
+{
+    return rc != null && rc.GetNaturalGravity().Length() > GRAV_EPS
+           && (phase == PhaseId.Climb || phase == PhaseId.Descent);
 }
 Scenario Classify(double fromG, double toG)
 {
@@ -851,21 +862,39 @@ PhaseId NextCruisePhase()
     if (phase == PhaseId.Cruise) return PhaseId.Descent;
     return phase;
 }
+bool TrySeaAlt(out double a)
+{
+    a = 0;
+    return rc != null && rc.TryGetPlanetElevation(MyPlanetElevation.Sealevel, out a);
+}
 bool BoundaryReady()
 {
     if (rc == null) return false;
     double gMag = rc.GetNaturalGravity().Length();
+    double seaAlt;
+    bool onPlanet = TrySeaAlt(out seaAlt);
+    vRate = (onPlanet && haveSeaAlt && dt > 0) ? (seaAlt - prevSeaAlt) / dt : 0;
+    prevSeaAlt = seaAlt;
+    haveSeaAlt = onPlanet;
     if (phase == PhaseId.Climb)
     {
         if (legScenario == Scenario.PlanetLocal)
-            return Vector3D.Distance(rc.GetPosition(), legStartPos) > PLANET_CLIMB_DIST;
+        {
+            bool level = Vector3D.Distance(rc.GetPosition(), legStartPos) > CLIMB_MIN_DIST
+                         && vRate < LEVEL_RATE;
+            boundaryFor = level ? boundaryFor + dt : 0;
+            return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+        }
         boundaryFor = gMag < GRAV_EPS ? boundaryFor + dt : 0;
         return boundaryFor >= BOUNDARY_CONFIRM_SEC;
     }
     if (phase == PhaseId.Cruise)
     {
         if (legScenario == Scenario.PlanetLocal)
-            return RemainingDistance() < PLANET_DESCENT_DIST;
+        {
+            boundaryFor = vRate < -DESCENT_RATE ? boundaryFor + dt : 0;
+            return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+        }
         if (legScenario == Scenario.Descent)
         {
             boundaryFor = gMag > GRAV_EPS ? boundaryFor + dt : 0;
@@ -898,6 +927,7 @@ void ArmCruise(bool toDest)
     legScenario = ClassifyLeg();
     legStartPos = rc.GetPosition();
     boundaryFor = 0;
+    prevSeaAlt = 0; haveSeaAlt = false; vRate = 0;
     cruiseIdx = 0;
     cruiseProgTimer = 0;
     cruiseBestDist = double.MaxValue;
