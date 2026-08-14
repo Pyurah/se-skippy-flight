@@ -1,4 +1,4 @@
-const string VERSION = "0.8.0";
+const string VERSION = "0.8.1";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -273,6 +273,7 @@ const double BOUNDARY_CONFIRM_SEC = 2.0;
 const double CLIMB_MIN_DIST = 100;
 const double LEVEL_RATE = 0.75;
 const double DESCENT_RATE = 1.5;
+const double DOCK_MATCH_DIST = 10.0;
 const double CLEAR_CONE_DOT = 0.70;
 const double CLEAR_CONFIRM_SEC = 1.5;
 const double STAGE_CONFIRM_SEC = 1.5;
@@ -421,6 +422,12 @@ void HandleCommand(string arg)
             if (phase == PhaseId.Idle || phase == PhaseId.Faulted)
             {
                 bool docked = DockedNow();
+                if (docked && !AtRouteEnd())
+                {
+                    operating = false;
+                    statusMsg = "START: not at a route dock - move to home/dest first";
+                    break;
+                }
                 bool atHome = AtHomeEnd();
                 if (runMode == RunMode.OneWay)
                 {
@@ -620,7 +627,11 @@ void TickIdle()
     ReleaseControl();
     if (!operating) return;
     phaseTimer = 0;
-    if (DockedNow()) SwitchPhase(AtHomeEnd() ? PhaseId.Loading : PhaseId.Unloading);
+    if (DockedNow())
+    {
+        if (!AtRouteEnd()) { statusMsg = "Idle: docked away from route - undock or move to home/dest"; return; }
+        SwitchPhase(AtHomeEnd() ? PhaseId.Loading : PhaseId.Unloading);
+    }
     else { leg.Outbound = false; SwitchPhase(PhaseId.Cruise); }
 }
 void TickLoading()
@@ -1524,6 +1535,14 @@ bool AtHomeEnd()
     Vector3D p = rc.GetPosition();
     return Vector3D.DistanceSquared(p, homePose.Pos) <= Vector3D.DistanceSquared(p, destPose.Pos);
 }
+bool AtRouteEnd()
+{
+    if (rc == null || !haveRoute) return false;
+    Vector3D p = rc.GetPosition();
+    double tol = DOCK_MATCH_DIST * DOCK_MATCH_DIST;
+    return Vector3D.DistanceSquared(p, homePose.Pos) <= tol
+        || Vector3D.DistanceSquared(p, destPose.Pos) <= tol;
+}
 void SetSorters(List<IMyConveyorSorter> list, bool on)
 {
     foreach (var s in list)
@@ -1573,6 +1592,7 @@ void RequestDepart()
     }
     if (phase == PhaseId.Idle && haveRoute && DockedNow())
     {
+        if (!AtRouteEnd()) { statusMsg = "DEPART: not at a route dock - GO HOME/DEST first"; return; }
         operating = true;
         bool atHome = AtHomeEnd();
         if (runMode == RunMode.OneWay)

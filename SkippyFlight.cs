@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.8.0";
+const string VERSION = "0.8.1";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -455,6 +455,12 @@ const double CLIMB_MIN_DIST = 100;        // m from the leg start before a "leve
 const double LEVEL_RATE = 0.75;           // m/s: |sea-level climb rate| below this counts as leveled off (Climb -> Cruise)
 const double DESCENT_RATE = 1.5;          // m/s: sea-level sink rate beyond this counts as descending to the dock (Cruise -> Descent)
 
+// ---- Route-end matching ----------------------------------------------------
+// A start/depart is only dispatched when the ship is parked AT a recorded route
+// dock (home or dest), within this distance of that pose. Prevents a beeline
+// across the map when the ship happens to be docked at some unrelated connector.
+const double DOCK_MATCH_DIST = 10.0;      // m: how close to a recorded docked pose counts as "at that end"
+
 // ---- Dock-clearance (anti-collision) tuning --------------------------------
 const double CLEAR_CONE_DOT = 0.70;       // cos(~45 deg): a camera must face this close to the dock direction for its raycast to be trusted (an out-of-cone ray silently reads empty, i.e. falsely "clear")
 const double CLEAR_CONFIRM_SEC = 1.5;     // s the corridor must read clear before a held approach resumes - debounces a ship briefly crossing the corridor so we don't lurch into its path
@@ -666,6 +672,12 @@ void HandleCommand(string arg)
             if (phase == PhaseId.Idle || phase == PhaseId.Faulted)
             {
                 bool docked = DockedNow();
+                if (docked && !AtRouteEnd())
+                {
+                    operating = false;   // don't let TickIdle dispatch from a non-route dock
+                    statusMsg = "START: not at a route dock - move to home/dest first";
+                    break;
+                }
                 bool atHome = AtHomeEnd();
                 if (runMode == RunMode.OneWay)
                 {
@@ -910,7 +922,12 @@ void TickIdle()
     ReleaseControl();
     if (!operating) return;
     phaseTimer = 0;   // fresh load/unload dwell when we pick a dock phase back up
-    if (DockedNow()) SwitchPhase(AtHomeEnd() ? PhaseId.Loading : PhaseId.Unloading);
+    if (DockedNow())
+    {
+        // Parked at an unrelated connector - hold rather than beeline to a recorded dock.
+        if (!AtRouteEnd()) { statusMsg = "Idle: docked away from route - undock or move to home/dest"; return; }
+        SwitchPhase(AtHomeEnd() ? PhaseId.Loading : PhaseId.Unloading);
+    }
     else { leg.Outbound = false; SwitchPhase(PhaseId.Cruise); }
 }
 
@@ -2301,6 +2318,20 @@ bool AtHomeEnd()
     return Vector3D.DistanceSquared(p, homePose.Pos) <= Vector3D.DistanceSquared(p, destPose.Pos);
 }
 
+// Is the ship physically parked at a recorded route dock (home OR dest), within
+// DOCK_MATCH_DIST of that pose? AtHomeEnd only picks the *nearer* end, so on its
+// own it can't tell "docked at a route end" from "docked at some other connector
+// that merely happens to be closer to one end" - which used to dispatch a leg and
+// beeline across the map to the recorded dock. A start/depart is gated on this.
+bool AtRouteEnd()
+{
+    if (rc == null || !haveRoute) return false;
+    Vector3D p = rc.GetPosition();
+    double tol = DOCK_MATCH_DIST * DOCK_MATCH_DIST;
+    return Vector3D.DistanceSquared(p, homePose.Pos) <= tol
+        || Vector3D.DistanceSquared(p, destPose.Pos) <= tol;
+}
+
 void SetSorters(List<IMyConveyorSorter> list, bool on)
 {
     foreach (var s in list)
@@ -2368,6 +2399,7 @@ void RequestDepart()
 
     if (phase == PhaseId.Idle && haveRoute && DockedNow())
     {
+        if (!AtRouteEnd()) { statusMsg = "DEPART: not at a route dock - GO HOME/DEST first"; return; }
         operating = true;
         bool atHome = AtHomeEnd();
         if (runMode == RunMode.OneWay)

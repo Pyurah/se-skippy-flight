@@ -341,6 +341,15 @@ and detects the climb-out plateau and the descent to the dock. Fully automatic �
 - [x] Rebuild + budget check: **94,451 chars (5,549 headroom, +1,014 vs 0.7.0)**, braces balanced
       (493/493). Version → 0.8.0.
 
+#### Fix — depart/start from an unrelated dock (v0.8.1)
+
+- [x] `AtRouteEnd()` proximity gate (within `DOCK_MATCH_DIST` = 10 m of the home or dest pose)
+      guards every docked dispatch — `RequestDepart`, `START`/`GO`, and the autonomous `TickIdle`
+      handoff. Previously `AtHomeEnd()` only picked the *nearer* recorded end, so departing while
+      connected to some other connector beelined to the recorded dock (dragging the ground / hitting
+      obstacles). Now those paths refuse with a clear status; real-endpoint and undocked-resume
+      starts are unchanged. Rebuild: **95,237 chars (4,763 headroom, +786 vs 0.8.0)**, braces balanced (498/498).
+
 ### Slice e — tower clearance (shuttle side)
 
 Layer the tower overlay (see **Traffic control / holding** above) onto the two existing commit

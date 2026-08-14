@@ -4,6 +4,22 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] - 2026-08-14
+
+### Fixed
+- **Depart/Start from an unrelated dock no longer beelines to a route dock.** When the ship was
+  connected to a connector that isn't the route's home or destination, `Depart Now` (ship button
+  or remote `DEPART`) and `START`/`GO` would dispatch a leg anyway and fly straight to the recorded
+  dock — dragging along the ground or through obstacles. `AtHomeEnd` only picked the *nearer*
+  recorded end; it never confirmed the ship was actually *at* it. A new `AtRouteEnd` proximity check
+  (within `DOCK_MATCH_DIST` = 10 m of the home or dest pose) now gates every docked dispatch:
+  `RequestDepart`, the `START`/`GO` command, and the autonomous `TickIdle` handoff all refuse with a
+  clear status ("not at a route dock — move to home/dest first") instead of departing. Starting from
+  a real route end, or resuming a flight while undocked, is unchanged.
+
+### Notes
+- Stripped size **95,237 chars** (4,763 headroom, +786 vs 0.8.0), braces balanced (498/498).
+
 ## [0.8.0] - 2026-08-14
 
 Slice d — **environment sensing.** The `Climb → Cruise → Descent` stage boundaries for same-planet
