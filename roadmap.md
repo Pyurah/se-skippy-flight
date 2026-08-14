@@ -1,0 +1,243 @@
+# SkippyFlight Roadmap
+
+Master tracking document for **SkippyFlight** — a phase-based flight controller for
+Space Engineers Programmable Blocks. This project is the next-generation successor to
+`Skippy-Shuttle` (v0.15.0), which stays frozen and in active use. SkippyFlight starts as a
+faithful copy of that script and is refactored onto a phase-object architecture.
+
+## Current status
+
+- **Version:** 0.1.0 (baseline — faithful copy of Skippy-Shuttle v0.15.0, unmodified behavior)
+- **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
+  build/test tooling; all validation is in-world)
+- **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
+  pipe-delimited reports) so a SkippyFlight ship and a Skippy-Shuttle base interoperate. Config
+  idioms (`MyIni`, `[shuttle]`/`[route]`/`[state]` sections) shared by convention, not code.
+
+---
+
+## Why this project exists
+
+`Skippy-Shuttle` flies A→B with an **11-state flat enum** (`State`) dispatched by a
+hand-maintained `switch` in `Main`. Three problems block a richer flight model:
+
+1. **Direction is baked into the enum.** Every flight phase exists twice
+   (`CruiseToDest`/`CruiseToHome`, `ApproachDest`/`ApproachHome`, `UndockHome`/`UndockDest`).
+   Adding Taxi/Climb/Descent/Approach doubles the enum again.
+2. **Transitions are hardcoded inline** inside each `Tick*` method, and the state set is
+   re-enumerated by hand in 4+ switches (`Main`, `IsFlightControlState`, `ShipState`,
+   `PrettyState`, plus `LoadState`). Every new phase edits all of them.
+3. **Environment sensing is binary** — `GetNaturalGravity()` magnitude only (`inGrav`/`inSpace`).
+   No altitude/atmosphere signal, so a planet↔space route is one undifferentiated cruise leg
+   that silently changes flight law mid-flight. No hook to split Climb/Cruise/Descent or to
+   insert a holding pattern.
+
+What is **not** a problem: the low-level primitives — `FlyToPose`, `AlignTo`, `ApplyForce`,
+`RunCruiseControl` — are already scenario- and thruster-type-agnostic (they read live
+`MaxEffectiveThrust`, which the game auto-zeros for the wrong environment, so the "thruster
+handoff" at the gravity boundary already works implicitly). **The granular phases are policy
+over these primitives, not new physics.**
+
+The "line-number limit" worry is really the **100,000-character PB limit**. The minified script
+is ~70.8 KB → ~29 KB headroom. Traffic control lives in a **separate `SkippyTower.cs`**, so it
+spends none of the ship's budget.
+
+**Intended outcome:** a controller whose *phase behavior*, *direction*, and *scenario* are three
+independent axes, so the flight model can grow (Taxi→Takeoff→Climb→Cruise→Descent→Approach→
+Landing→Taxi) and holding/traffic-control can slot in cleanly — without the combinatorial enum
+blow-up or touching the flight physics that already works.
+
+---
+
+## The mental model — three independent axes
+
+- **Phase** = *what behavior is running* (Undock, DepartStaging, Climb, Cruise, Descent, Approach,
+  Holding, Taxi, Dock, Load, Unload, Record, Idle, Fault). Direction-free.
+- **Leg** = *the current traversal context*: `outbound` (home→dest) vs inbound, the origin
+  `DockPose`, the target `DockPose`, the path, and the detected scenario. Replaces the duplicated
+  `*ToDest`/`*ToHome` states and the `bool toDest` params.
+- **Scenario** = *which phases apply and how they're tuned*, auto-detected from the recorded
+  endpoints. Selects the ordered **flight plan**.
+
+### Phase catalog
+
+The controller never flies straight from cruise onto a connector, and never straight from undock
+into a climb. Every dock is bracketed by a **staging fix** (assembly point clear of the
+structure) on departure and a **holding fix** (arrival wait point) on arrival. The **only** phase
+that ever moves the ship onto the connector is `Taxi`, and it is **clearance-gated** — a craft
+waits at the holding fix until the pad/"door" is free and no other craft is in the corridor
+before it proceeds.
+
+| Phase | SE behavior | Built on |
+|---|---|---|
+| `Undock` | Disconnect, powered back-off off the connector to the departure stand-off | `TickUndock` body |
+| `DepartStaging` | Fly to and hold at the **departure staging fix** — clear of the structure and traffic; wait for clearance to begin the flight, then rotate toward the route | `FlyToPose` loiter + clearance gate |
+| `Climb` | Powered ascent; full-power governor; until altitude/gravity threshold | `RunCruiseControl` + climb policy |
+| `Cruise` | Steady traverse; efficient governor; in space coasts thrust-free | `RunCruiseControl` |
+| `Descent` | Controlled loss / braking burn; conservative governor | `RunCruiseControl` + descent policy |
+| `Approach` | Fly the approach corridor to the **arrival holding fix** — stops *at the holding fix, not the connector* | `TickApproach` body, retargeted |
+| `Holding` | Station-keep at the holding fix; wait until the pad/door is clear of other craft and cleared (local corridor check now; tower grant later) | `FlyToPose` loiter + clearance gate |
+| `Taxi` | The cleared final move: from the holding fix down the connector axis onto the connector | `FlyToPose` down the corridor |
+| `Dock` | `Connect()`, confirm, hand to cargo/next leg | `OnDocked` |
+| `Load`/`Unload`/`Idle`/`Record`/`Fault` | unchanged | existing ticks |
+
+Climb / Cruise / Descent are **the same `RunCruiseControl` with different speed governors and
+altitude targets**, plus distinct operator status — not three physics engines.
+`DepartStaging`/`Holding` are the same loiter primitive with different fixes and clearance
+sources.
+
+### Staging & holding fixes — where they come from
+
+- **Default (derived):** two stand-offs on the connector axis, reusing `ApproachPoint(p)` at two
+  distances — an inner one (taxi start, ≈ today's `approachDist`) and an outer one (the
+  staging/holding fix, a new `holdDist` config). Zero extra teaching; behavior degrades to "back
+  off, pause, proceed" for a solo craft on a dedicated pad.
+- **Recordable (optional):** `RECORD` can additionally capture an explicit staging/holding pose
+  per end for structures where a straight axial stand-off isn't clear of the geometry.
+- **Tower-assigned (Phase 2+):** for a shared bank of pads, the tower hands back a holding fix + a
+  dynamic pad pose; the ship flies the assigned pose. Additive over IGC.
+
+### Clearance model (what releases `Holding`/`DepartStaging`)
+
+- **Dedicated spot / solo:** local corridor clear (`DockCorridorBlocked`) + a short confirm dwell.
+  A lone craft on its own pad effectively auto-clears once the corridor reads empty — but it still
+  *stages* rather than diving in.
+- **Shared bank / multi-craft:** the tower grants clearance and a slot; until then the craft
+  holds. Mirrors a station with one door and limited access — craft wait clear of each other for
+  the door to open.
+
+### Scenario → flight plan (outbound leg)
+
+Staging, Holding, and Taxi are present in **every** scenario — the anti-"straight-onto-the-
+connector" guarantee. Only Climb/Descent are scenario-gated.
+
+| Scenario | Detected from | Outbound phases |
+|---|---|---|
+| **PlanetLocal** (A) | home in gravity, dest in gravity | Undock → DepartStaging → Climb → Cruise → Descent → Approach → Holding → Taxi → Dock |
+| **Ascent** (B) | home in gravity, dest in space | Undock → DepartStaging → Climb → Cruise(coast) → Approach → Holding → Taxi → Dock |
+| **Descent** (D) | home in space, dest in gravity | Undock → DepartStaging → Cruise(coast) → Descent → Approach → Holding → Taxi → Dock |
+| **SpaceLocal** (C) | home in space, dest in space | Undock → DepartStaging → Cruise → Approach → Holding → Taxi → Dock |
+
+The inbound leg reverses the scenario (Ascent outbound → Descent inbound) — one plan definition
+serves both directions via the `Leg.outbound` flag.
+
+---
+
+## Base-controller architecture (phase objects)
+
+Lightweight **phase objects** nested in `Program`:
+
+```
+abstract class FlightPhase {
+    public abstract PhaseId Id { get; }
+    public abstract bool IsFlightControl { get; }   // replaces IsFlightControlState switch
+    public abstract string Label { get; }            // replaces ShipState/PrettyState switches
+    public virtual void Enter(Program p, Leg leg) {} // reset phaseTimer, arm cruise, etc.
+    public abstract PhaseId Tick(Program p, Leg leg);// drive control; return next PhaseId
+    public virtual void Exit(Program p, Leg leg) {}
+}
+```
+
+- Concrete phases are **nested classes** — full access to `Program`'s private members through the
+  passed `Program p`, so they call the *existing* `p.FlyToPose(...)`, `p.RunCruiseControl(...)`,
+  etc. with **zero logic duplication**.
+- Instantiated **once** into a `Dictionary<PhaseId, FlightPhase>` at `Program()` — no per-tick
+  allocation.
+- `Main` collapses to `var next = current.Tick(this, leg); if (next != current.Id) SwitchPhase(next);`.
+- Loop-rate and labels come from the object — the parallel switches disappear.
+- Transitions stay inside each phase for the extraction slice; a later slice lifts the sequence
+  into a data-driven flight plan (`PhaseId[]` per scenario).
+
+---
+
+## Scenario auto-detection
+
+At `RECORD` time, capture each dock's natural-gravity magnitude into the `[route]` section:
+`homeG = rc.GetNaturalGravity().Length()` at home, `destG` at dest. `Classify(homeG, destG)` →
+PlanetLocal / Ascent / Descent / SpaceLocal (thresholds mirror the `1e-3` test). The inbound leg
+swaps origin/target and flips Ascent↔Descent. Routes without the gravity keys fall back to today's
+single-cruise behavior (no regression). Altitude sensing (`rc.TryGetPlanetElevation`) is added
+only when Climb/Cruise/Descent split.
+
+---
+
+## Traffic control / holding (separate tower)
+
+The control tower is a **separate `SkippyTower.cs`** (own char budget). The staging/holding/taxi
+phases are the seam it plugs into. Clearance source is pluggable: local corridor check now, tower
+grant later. `Taxi` is the gated commit — a craft only leaves `Holding` for `Taxi` (the sole phase
+that touches the connector) once cleared. Wire protocol is additive (superset): existing
+`name|state|eta|dist|fill|mass|running` report unchanged; add `REQ|pad`, `HOLD`, `CLEAR|pad|pose`.
+Old shuttles ignore the new messages and degrade gracefully.
+
+---
+
+## Character-budget strategy
+
+Phase objects add class scaffolding, offset by: (1) duplicated `*ToDest`/`*ToHome` ticks collapse
+to one phase each and 4 hand-maintained switches become object properties; (2) comments are
+stripped by `build-min.py` so documentation is free; (3) phases are thin dispatchers to existing
+methods. **Gate:** after each slice, run `python tools/build-min.py` and record the stripped size.
+Fallback if the full model threatens the ceiling: a lean `enum PhaseId` + transition table + `Leg`
+context (same decoupling, lower char cost).
+
+Baseline (v0.1.0, unmodified copy): stripped **70,780 chars**, **29,220** headroom.
+
+---
+
+## Roadmap
+
+### Slice a — scaffold + phase-object extraction (in progress)
+
+Behavior byte-for-byte equivalent to Skippy-Shuttle v0.15.0; the phase-object base controller
+replaces the flat enum. No new phases, no scenario logic. Proves the abstraction and the budget.
+
+- [x] Scaffold `Skippy-Flight\` from a faithful copy; baseline builds (70,780 chars).
+- [ ] `enum PhaseId` (direction-free) + `struct Leg` context.
+- [ ] `abstract class FlightPhase` + concrete phases wrapping existing tick bodies verbatim.
+- [ ] `Main` dispatch → `current.Tick(this, leg)`; `SwitchPhase`; `IsFlightControl`/`Label` from
+      the phase objects.
+- [ ] Entry dispatch (`START`/`GO`, `RequestDepart`) sets `(PhaseId, outbound)`.
+- [ ] Persistence: `[state]` stores `phase` + `outbound` with back-compat mapping from old names.
+- [ ] Rebuild + budget check; record stripped-size delta; version → 0.2.0.
+
+### Slice b — staging, holding & taxi (the anti-dive guarantee)
+
+Add `DepartStaging`, `Holding`, `Taxi` phases with derived stand-off fixes (`holdDist` config) and
+the local clearance gate. Assemble before flying, hold clear before docking, never straight onto a
+connector.
+
+### Slice c — flight plan + scenario
+
+Capture `homeG`/`destG` at record; add `Classify`; lift the phase sequence into a data-driven
+`PhaseId[]` plan per scenario; add `Climb`/`Descent` phases (governor + status, reusing
+`RunCruiseControl`).
+
+### Slice d — environment sensing
+
+Add altitude reader (`rc.TryGetPlanetElevation`); trigger Climb→Cruise→Descent boundaries and the
+handoff danger-zone status from gravity+altitude.
+
+### Slice e — tower clearance
+
+Swap the local clearance gate in `DepartStaging`/`Holding`/`Taxi` for additive IGC clearance
+(`REQ`/`HOLD`/`CLEAR`); build the shared-bank pad assignment.
+
+### Slice f — SkippyTower.cs
+
+The control tower (pad registry, clearance grants, slot scheduling) as its own script.
+
+### Later
+
+- Multi-stop routes (generalize `Leg` beyond two poses).
+- Per-item load manifests.
+
+---
+
+## Known gaps / risks (inherited from Skippy-Shuttle)
+
+- Custom gyro + thruster controller; geometry- and mass-sensitive. Flight loop runs at 60 Hz;
+  attitude gains (`gyroGain`/`gyroDamp`) live-tunable; fault-on-timeout prevents damage.
+- Dampeners OFF while flying (fuel-free space coast), restored on stop/dock/fault/recompile.
+- Obeys the world speed cap; absolute coordinates assume static grids only.
+- No automated test harness is possible for PB scripts; all validation is in-world.
