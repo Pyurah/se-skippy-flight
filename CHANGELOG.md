@@ -4,6 +4,18 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-08-14
+
+### Fixed
+- Undock no longer stalls to the 45-second approach timeout before starting a leg. When rotating
+  to face the first cruise waypoint, the target "up" is now kept perpendicular to the (possibly
+  steeply pitched) facing. Previously it paired that pitched forward with the near-vertical
+  recorded dock up — a pose the gyros cannot satisfy — so `AlignTo` never fell under `ALIGN_TOL`
+  and the undock only advanced when the watchdog fired. Most visible on a sparse route whose first
+  cruise target is the far, low approach point: the ship sat on the pad with its nose aimed at the
+  ground for ~45s before departing. Behavior on well-recorded routes (near-level first target) is
+  unchanged. Inherited from Skippy-Shuttle; not introduced by the phase refactor.
+
 ## [0.2.0] - 2026-08-14
 
 Phase-object extraction. The direction-baked 11-value `State` enum and its hand-maintained

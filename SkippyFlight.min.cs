@@ -1,4 +1,4 @@
-const string VERSION = "0.2.0";
+const string VERSION = "0.2.1";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -605,12 +605,18 @@ void TickUndock()
     Vector3D standoff = ApproachPoint(p);
     bool clear = Vector3D.Distance(rc.GetPosition(), standoff) < 3.0;
     Vector3D faceFwd = p.Fwd;
+    Vector3D faceUp = p.Up;
     if (clear)
     {
         Vector3D toTarget = FirstCruiseTarget(fromHome) - standoff;
-        if (toTarget.LengthSquared() > 1) faceFwd = Vector3D.Normalize(toTarget);
+        if (toTarget.LengthSquared() > 1)
+        {
+            faceFwd = Vector3D.Normalize(toTarget);
+            Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
+            if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+        }
     }
-    bool ready = FlyToPose(standoff, faceFwd, p.Up, 1.0) && clear;
+    bool ready = FlyToPose(standoff, faceFwd, faceUp, 1.0) && clear;
     phaseTimer += dt;
     statusMsg = clear ? "Aligning for cruise"
                       : (fromHome ? "Clearing home dock" : "Clearing station dock");

@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.2.0";
+const string VERSION = "0.2.1";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -888,13 +888,25 @@ void TickUndock()
     bool clear = Vector3D.Distance(rc.GetPosition(), standoff) < 3.0;   // far enough off to rotate safely
 
     Vector3D faceFwd = p.Fwd;   // hold docked facing until clear of the dock
+    Vector3D faceUp = p.Up;
     if (clear)
     {
         Vector3D toTarget = FirstCruiseTarget(fromHome) - standoff;
-        if (toTarget.LengthSquared() > 1) faceFwd = Vector3D.Normalize(toTarget);
+        if (toTarget.LengthSquared() > 1)
+        {
+            faceFwd = Vector3D.Normalize(toTarget);
+            // Keep the target up perpendicular to the (possibly steeply pitched)
+            // facing. Pairing a pitched forward with the near-vertical recorded
+            // dock up is a pose the gyros can't satisfy, so AlignTo would never
+            // fall under ALIGN_TOL and undock would stall to the 45s timeout -
+            // most visible on a sparse route whose first cruise target is the far,
+            // low approach point (nose ends up aimed at the ground).
+            Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
+            if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+        }
     }
 
-    bool ready = FlyToPose(standoff, faceFwd, p.Up, 1.0) && clear;
+    bool ready = FlyToPose(standoff, faceFwd, faceUp, 1.0) && clear;
     phaseTimer += dt;
     statusMsg = clear ? "Aligning for cruise"
                       : (fromHome ? "Clearing home dock" : "Clearing station dock");
