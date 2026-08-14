@@ -7,7 +7,8 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.1.0 (baseline — faithful copy of Skippy-Shuttle v0.15.0, unmodified behavior)
+- **Version:** 0.2.0 (Slice a delivered — phase-object base controller; behavior identical to
+  Skippy-Shuttle v0.15.0)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
@@ -182,24 +183,28 @@ Fallback if the full model threatens the ceiling: a lean `enum PhaseId` + transi
 context (same decoupling, lower char cost).
 
 Baseline (v0.1.0, unmodified copy): stripped **70,780 chars**, **29,220** headroom.
+After Slice a (v0.2.0, phase objects): stripped **75,112 chars**, **24,888** headroom (+4,332).
 
 ---
 
 ## Roadmap
 
-### Slice a — scaffold + phase-object extraction (in progress)
+### Slice a — scaffold + phase-object extraction (delivered, 0.2.0)
 
 Behavior byte-for-byte equivalent to Skippy-Shuttle v0.15.0; the phase-object base controller
 replaces the flat enum. No new phases, no scenario logic. Proves the abstraction and the budget.
 
 - [x] Scaffold `Skippy-Flight\` from a faithful copy; baseline builds (70,780 chars).
-- [ ] `enum PhaseId` (direction-free) + `struct Leg` context.
-- [ ] `abstract class FlightPhase` + concrete phases wrapping existing tick bodies verbatim.
-- [ ] `Main` dispatch → `current.Tick(this, leg)`; `SwitchPhase`; `IsFlightControl`/`Label` from
+- [x] `enum PhaseId` (direction-free) + `struct Leg` context.
+- [x] `abstract class FlightPhase` + concrete phases wrapping existing tick bodies verbatim.
+- [x] `Main` dispatch → `phases[phase].Tick(this)`; `SwitchPhase`; `IsFlightControl`/`Label` from
       the phase objects.
-- [ ] Entry dispatch (`START`/`GO`, `RequestDepart`) sets `(PhaseId, outbound)`.
-- [ ] Persistence: `[state]` stores `phase` + `outbound` with back-compat mapping from old names.
-- [ ] Rebuild + budget check; record stripped-size delta; version → 0.2.0.
+- [x] Entry dispatch (`START`/`GO`/`HOME`/`RESUME`, `RequestDepart`, `TickIdle`) sets
+      `(PhaseId, outbound)`.
+- [x] Persistence: `[state]` stores `phase` + `outbound`, reading the legacy `state` name as a
+      fallback; `LegacyStateName` keeps the IGC report wire unchanged for cross-version base boards.
+- [x] Rebuild + budget check; version → 0.2.0. **Stripped: 75,112 chars (24,888 headroom;
+      +4,333 vs the 0.1.0 copy).** Braces balanced.
 
 ### Slice b — staging, holding & taxi (the anti-dive guarantee)
 

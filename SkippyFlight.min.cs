@@ -1,4 +1,4 @@
-const string VERSION = "0.1.0";
+const string VERSION = "0.2.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -10,19 +10,87 @@ struct DockPose
     public Vector3D ConnFwd;
     public long BaseGridId;
 }
-enum State
+enum PhaseId
 {
     Idle,
-    Loading,
-    UndockHome,
-    CruiseToDest,
-    ApproachDest,
-    Unloading,
-    UndockDest,
-    CruiseToHome,
-    ApproachHome,
     Recording,
+    Loading,
+    Undock,
+    Cruise,
+    Approach,
+    Unloading,
     Faulted
+}
+struct Leg
+{
+    public bool Outbound;
+}
+abstract class FlightPhase
+{
+    public abstract PhaseId Id { get; }
+    public abstract bool IsFlightControl { get; }
+    public abstract string Label { get; }
+    public virtual void Enter(Program p) { }
+    public abstract void Tick(Program p);
+    public virtual void Exit(Program p) { }
+}
+class IdlePhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Idle; } }
+    public override bool IsFlightControl { get { return false; } }
+    public override string Label { get { return "Idle"; } }
+    public override void Tick(Program p) { p.TickIdle(); }
+}
+class RecordingPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Recording; } }
+    public override bool IsFlightControl { get { return false; } }
+    public override string Label { get { return "Recording"; } }
+    public override void Tick(Program p) { p.TickRecording(); }
+}
+class LoadingPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Loading; } }
+    public override bool IsFlightControl { get { return false; } }
+    public override string Label { get { return "Loading"; } }
+    public override void Enter(Program p) { p.leg.Outbound = true; }
+    public override void Tick(Program p) { p.TickLoading(); }
+}
+class UndockPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Undock; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Undock"; } }
+    public override void Tick(Program p) { p.TickUndock(); }
+}
+class CruisePhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Cruise; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Cruise"; } }
+    public override void Tick(Program p) { p.TickCruise(); }
+}
+class ApproachPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Approach; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Docking"; } }
+    public override void Tick(Program p) { p.TickApproach(); }
+}
+class UnloadingPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Unloading; } }
+    public override bool IsFlightControl { get { return false; } }
+    public override string Label { get { return "Unloading"; } }
+    public override void Enter(Program p) { p.leg.Outbound = false; }
+    public override void Tick(Program p) { p.TickUnloading(); }
+}
+class FaultedPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Faulted; } }
+    public override bool IsFlightControl { get { return false; } }
+    public override string Label { get { return "FAULT"; } }
+    public override void Tick(Program p) { p.TickFaulted(); }
 }
 Role role = Role.Shuttle;
 RunMode runMode = RunMode.Continuous;
@@ -60,7 +128,9 @@ DockPose homePose, destPose;
 string homeConn = "", destConn = "";
 List<Vector3D> path = new List<Vector3D>();
 bool haveRoute = false;
-State state = State.Idle;
+PhaseId phase = PhaseId.Idle;
+Leg leg;
+Dictionary<PhaseId, FlightPhase> phases;
 bool operating = false;
 string statusMsg = "Idle";
 double phaseTimer = 0;
@@ -135,6 +205,17 @@ const double CLEAR_LEGACY_MARGIN = 5.0;
 Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
+    phases = new Dictionary<PhaseId, FlightPhase>
+    {
+        { PhaseId.Idle,      new IdlePhase() },
+        { PhaseId.Recording, new RecordingPhase() },
+        { PhaseId.Loading,   new LoadingPhase() },
+        { PhaseId.Undock,    new UndockPhase() },
+        { PhaseId.Cruise,    new CruisePhase() },
+        { PhaseId.Approach,  new ApproachPhase() },
+        { PhaseId.Unloading, new UnloadingPhase() },
+        { PhaseId.Faulted,   new FaultedPhase() }
+    };
     if (string.IsNullOrWhiteSpace(Me.CustomData)) WriteConfigTemplate();
     LoadConfig();
     if (role == Role.Shuttle) BackfillConfig();
@@ -153,7 +234,8 @@ void Save()
 {
     var ini = new MyIni();
     ini.TryParse(Me.CustomData);
-    ini.Set("state", "state", state.ToString());
+    ini.Set("state", "phase", phase.ToString());
+    ini.Set("state", "outbound", leg.Outbound);
     ini.Set("state", "operating", operating);
     ini.Set("state", "phaseTimer", phaseTimer);
     ini.Set("state", "estHydroOut", estHydroOut);
@@ -172,21 +254,8 @@ void Main(string argument, UpdateType source)
         if (role == Role.Base) { RunBase(); return; }
         if (rc == null) { Discover(); if (rc == null) { statusMsg = "No Remote Control found"; RenderShip(); return; } }
         DrainIgc();
-        switch (state)
-        {
-            case State.Recording:  TickRecording();  break;
-            case State.Loading:    TickLoading();     break;
-            case State.UndockHome: TickUndock(true);  break;
-            case State.CruiseToDest: TickCruise(true); break;
-            case State.ApproachDest: TickApproach(true); break;
-            case State.Unloading:  TickUnloading();   break;
-            case State.UndockDest: TickUndock(false); break;
-            case State.CruiseToHome: TickCruise(false); break;
-            case State.ApproachHome: TickApproach(false); break;
-            case State.Idle:       TickIdle();         break;
-            case State.Faulted:    AbortAutopilot(); ReleaseControl(); SetSorters(loadSorters, false); SetSorters(unloadSorters, false); break;
-        }
-        Runtime.UpdateFrequency = IsFlightControlState() ? UpdateFrequency.Update1 : UpdateFrequency.Update10;
+        phases[phase].Tick(this);
+        Runtime.UpdateFrequency = phases[phase].IsFlightControl ? UpdateFrequency.Update1 : UpdateFrequency.Update10;
         sinceRender += dt;
         if (sinceRender >= 0.15 || !string.IsNullOrEmpty(argument))
         {
@@ -197,24 +266,54 @@ void Main(string argument, UpdateType source)
     }
     catch (Exception e)
     {
-        state = State.Faulted;
+        phase = PhaseId.Faulted;
         statusMsg = "ERROR: " + e.Message;
         Echo(statusMsg);
     }
 }
-bool IsFlightControlState()
+void SwitchPhase(PhaseId next)
 {
-    switch (state)
+    if (next == phase) return;
+    phases[phase].Exit(this);
+    phase = next;
+    phases[phase].Enter(this);
+}
+void TickFaulted()
+{
+    AbortAutopilot();
+    ReleaseControl();
+    SetSorters(loadSorters, false);
+    SetSorters(unloadSorters, false);
+}
+string LegacyStateName()
+{
+    switch (phase)
     {
-        case State.UndockHome:
-        case State.CruiseToDest:
-        case State.ApproachDest:
-        case State.UndockDest:
-        case State.CruiseToHome:
-        case State.ApproachHome:
-            return true;
-        default:
-            return false;
+        case PhaseId.Loading:   return "Loading";
+        case PhaseId.Undock:    return leg.Outbound ? "UndockHome"   : "UndockDest";
+        case PhaseId.Cruise:    return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
+        case PhaseId.Approach:  return leg.Outbound ? "ApproachDest" : "ApproachHome";
+        case PhaseId.Unloading: return "Unloading";
+        case PhaseId.Recording: return "Recording";
+        case PhaseId.Faulted:   return "Faulted";
+        default:                return "Idle";
+    }
+}
+void ApplyLegacyState(string name)
+{
+    switch (name)
+    {
+        case "Loading":      phase = PhaseId.Loading;   leg.Outbound = true;  break;
+        case "UndockHome":   phase = PhaseId.Undock;    leg.Outbound = true;  break;
+        case "CruiseToDest": phase = PhaseId.Cruise;    leg.Outbound = true;  break;
+        case "ApproachDest": phase = PhaseId.Approach;  leg.Outbound = true;  break;
+        case "Unloading":    phase = PhaseId.Unloading; leg.Outbound = false; break;
+        case "UndockDest":   phase = PhaseId.Undock;    leg.Outbound = false; break;
+        case "CruiseToHome": phase = PhaseId.Cruise;    leg.Outbound = false; break;
+        case "ApproachHome": phase = PhaseId.Approach;  leg.Outbound = false; break;
+        case "Recording":    phase = PhaseId.Recording; break;
+        case "Faulted":      phase = PhaseId.Faulted;   break;
+        default:             phase = PhaseId.Idle;      break;
     }
 }
 void HandleCommand(string arg)
@@ -232,19 +331,23 @@ void HandleCommand(string arg)
         case "GO":
             if (!haveRoute) { statusMsg = "No route - RECORD HOME/DEST first"; break; }
             operating = true;
-            if (state == State.Idle || state == State.Faulted)
+            if (phase == PhaseId.Idle || phase == PhaseId.Faulted)
             {
                 bool docked = DockedNow();
                 bool atHome = AtHomeEnd();
                 if (runMode == RunMode.OneWay)
-                    state = docked && atHome ? State.Loading
-                          : docked          ? State.UndockDest
-                          : atHome          ? State.CruiseToDest
-                          :                   State.CruiseToHome;
+                {
+                    if (docked && atHome) SwitchPhase(PhaseId.Loading);
+                    else if (docked)      { leg.Outbound = false; SwitchPhase(PhaseId.Undock); }
+                    else if (atHome)      { leg.Outbound = true;  SwitchPhase(PhaseId.Cruise); }
+                    else                  { leg.Outbound = false; SwitchPhase(PhaseId.Cruise); }
+                }
                 else
-                    state = docked && atHome ? State.Loading
-                          : docked          ? State.Unloading
-                          :                   State.CruiseToHome;
+                {
+                    if (docked && atHome) SwitchPhase(PhaseId.Loading);
+                    else if (docked)      SwitchPhase(PhaseId.Unloading);
+                    else                  { leg.Outbound = false; SwitchPhase(PhaseId.Cruise); }
+                }
                 phaseTimer = 0;
                 departRequested = false;
             }
@@ -257,7 +360,7 @@ void HandleCommand(string arg)
             ReleaseControl();
             SetSorters(loadSorters, false);
             SetSorters(unloadSorters, false);
-            state = State.Idle;
+            SwitchPhase(PhaseId.Idle);
             statusMsg = "Stopped";
             break;
         case "HOME":
@@ -266,13 +369,14 @@ void HandleCommand(string arg)
             if (DockedNow() && AtHomeEnd())
             {
                 operating = false;
-                state = State.Idle;
+                SwitchPhase(PhaseId.Idle);
                 statusMsg = "Already home";
             }
             else
             {
                 operating = true;
-                state = DockedNow() ? State.UndockDest : State.CruiseToHome;
+                leg.Outbound = false;
+                SwitchPhase(DockedNow() ? PhaseId.Undock : PhaseId.Cruise);
                 statusMsg = "Returning home";
             }
             break;
@@ -291,7 +395,7 @@ void HandleCommand(string arg)
             break;
         case "RESUME":
             LoadState();
-            statusMsg = "Resumed: " + state;
+            statusMsg = "Resumed: " + LegacyStateName();
             break;
         case "CLEARROUTE":
             ClearRoute();
@@ -336,13 +440,13 @@ void RecordHome()
     path.Clear();
     lastCrumb = homePose.Pos;
     lastDir = Vector3D.Zero;
-    state = State.Recording;
+    SwitchPhase(PhaseId.Recording);
     operating = false;
     statusMsg = "Recording from HOME (" + homeConn + "). Fly to destination.";
 }
 void RecordDest()
 {
-    if (state != State.Recording) { statusMsg = "RECORD DEST: run RECORD HOME first"; return; }
+    if (phase != PhaseId.Recording) { statusMsg = "RECORD DEST: run RECORD HOME first"; return; }
     var c = ConnectedConnector();
     if (c == null) { statusMsg = "RECORD DEST: dock at the destination connector first"; return; }
     destPose = CapturePose(c);
@@ -350,7 +454,7 @@ void RecordDest()
     if (path.Count == 0 || Vector3D.Distance(path[path.Count - 1], destPose.Pos) > 5)
         AddCrumb(rc.GetPosition());
     haveRoute = true;
-    state = State.Idle;
+    SwitchPhase(PhaseId.Idle);
     SaveRoute();
     statusMsg = "Route saved: " + homeConn + " -> " + destConn + " (" + path.Count + " waypoints)";
 }
@@ -410,8 +514,8 @@ void TickIdle()
     ReleaseControl();
     if (!operating) return;
     phaseTimer = 0;
-    if (DockedNow()) state = AtHomeEnd() ? State.Loading : State.Unloading;
-    else state = State.CruiseToHome;
+    if (DockedNow()) SwitchPhase(AtHomeEnd() ? PhaseId.Loading : PhaseId.Unloading);
+    else { leg.Outbound = false; SwitchPhase(PhaseId.Cruise); }
 }
 void TickLoading()
 {
@@ -430,7 +534,7 @@ void TickLoading()
         departRequested = false;
         BeginLegMeasure(true);
         statusMsg = "Loaded (" + fill.ToString("0") + "%, " + (mass / 1000.0).ToString("0.0") + "t) - departing";
-        state = State.UndockHome;
+        SwitchPhase(PhaseId.Undock);
         phaseTimer = 0;
         return;
     }
@@ -451,7 +555,7 @@ void TickUnloading()
             departRequested = false;
             phaseTimer = 0;
             operating = false;
-            state = State.Idle;
+            SwitchPhase(PhaseId.Idle);
             statusMsg = "Delivered - holding at destination";
             return;
         }
@@ -460,7 +564,7 @@ void TickUnloading()
         departRequested = false;
         BeginLegMeasure(false);
         phaseTimer = 0;
-        state = State.UndockDest;
+        SwitchPhase(PhaseId.Undock);
         return;
     }
     statusMsg = DepartStatus(false, fill);
@@ -486,8 +590,9 @@ string DepartStatus(bool atHome, double fill)
     if (trig == DepartTrigger.Timer)  return act + " - dwell " + phaseTimer.ToString("0") + "/" + dwellSec.ToString("0") + "s";
     return act;
 }
-void TickUndock(bool fromHome)
+void TickUndock()
 {
+    bool fromHome = leg.Outbound;
     var c = GetConnector(fromHome ? homeConn : destConn);
     DockPose p = fromHome ? homePose : destPose;
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
@@ -513,7 +618,7 @@ void TickUndock(bool fromHome)
     {
         ReleaseControl();
         phaseTimer = 0;
-        state = fromHome ? State.CruiseToDest : State.CruiseToHome;
+        SwitchPhase(PhaseId.Cruise);
     }
 }
 Vector3D FirstCruiseTarget(bool toDest)
@@ -521,8 +626,9 @@ Vector3D FirstCruiseTarget(bool toDest)
     BuildLeg(toDest);
     return legWps[0];
 }
-void TickCruise(bool toDest)
+void TickCruise()
 {
+    bool toDest = leg.Outbound;
     if (!CruiseArmed(toDest)) { ArmCruise(toDest); return; }
     cruiseProgTimer += dt;
     bool done = RunCruiseControl();
@@ -531,7 +637,7 @@ void TickCruise(bool toDest)
     {
         cruiseArmed = false;
         ReleaseControl();
-        state = toDest ? State.ApproachDest : State.ApproachHome;
+        SwitchPhase(PhaseId.Approach);
         phaseTimer = 0;
         return;
     }
@@ -539,7 +645,7 @@ void TickCruise(bool toDest)
     {
         cruiseArmed = false;
         ReleaseControl();
-        state = State.Faulted;
+        SwitchPhase(PhaseId.Faulted);
         statusMsg = "Cruise stuck - check thrust/gyro/geometry";
     }
 }
@@ -552,7 +658,7 @@ void ArmCruise(bool toDest)
     BuildLeg(toDest);
     if (legWps.Count == 0)
     {
-        state = State.Faulted;
+        SwitchPhase(PhaseId.Faulted);
         statusMsg = "Cruise: empty path - re-record route";
         return;
     }
@@ -701,8 +807,9 @@ bool RunCruiseControl()
     bool atEnd = cruiseIdx == legWps.Count - 1;
     return atEnd && dist < WpArriveRadius() && vmag < ARRIVE_SPEED;
 }
-void TickApproach(bool toDest)
+void TickApproach()
 {
+    bool toDest = leg.Outbound;
     cruiseArmed = false;
     var c = GetConnector(toDest ? destConn : homeConn);
     DockPose p = toDest ? destPose : homePose;
@@ -712,7 +819,7 @@ void TickApproach(bool toDest)
         ReleaseControl();
         c.Connect();
         phaseTimer = 0;
-        OnDocked(toDest);
+        OnDocked();
         return;
     }
     if (c != null && c.Status == MyShipConnectorStatus.Connectable)
@@ -730,7 +837,7 @@ void TickApproach(bool toDest)
         {
             AbortAutopilot();
             ReleaseControl();
-            state = State.Faulted;
+            SwitchPhase(PhaseId.Faulted);
             statusMsg = "Dock blocked - gave up after " + dockBlockSec.ToString("0") + "s";
         }
         return;
@@ -755,7 +862,7 @@ void TickApproach(bool toDest)
     {
         AbortAutopilot();
         ReleaseControl();
-        state = State.Faulted;
+        SwitchPhase(PhaseId.Faulted);
         statusMsg = "Docking timed out - check approach geometry";
     }
 }
@@ -916,19 +1023,20 @@ void SetDampeners(bool on)
         dampenersOwned = true;
     }
 }
-void OnDocked(bool atDest)
+void OnDocked()
 {
+    bool atDest = leg.Outbound;
     FinishLegMeasure();
     if (atDest)
     {
-        state = State.Unloading;
+        SwitchPhase(PhaseId.Unloading);
         phaseTimer = 0;
     }
     else
     {
-        if (runMode == RunMode.OneTrip) { operating = false; state = State.Idle; statusMsg = "Trip complete"; }
-        else if (runMode == RunMode.OneWay) { operating = false; state = State.Idle; statusMsg = "Holding at home"; }
-        else { state = State.Loading; phaseTimer = 0; }
+        if (runMode == RunMode.OneTrip) { operating = false; SwitchPhase(PhaseId.Idle); statusMsg = "Trip complete"; }
+        else if (runMode == RunMode.OneWay) { operating = false; SwitchPhase(PhaseId.Idle); statusMsg = "Holding at home"; }
+        else { SwitchPhase(PhaseId.Loading); phaseTimer = 0; }
     }
 }
 bool DockCorridorBlocked(DockPose p)
@@ -1138,20 +1246,23 @@ void DrainIgc()
 }
 void RequestDepart()
 {
-    if (state == State.Loading || state == State.Unloading)
+    if (phase == PhaseId.Loading || phase == PhaseId.Unloading)
     {
         departRequested = true;
         statusMsg = "Depart requested";
         return;
     }
-    if (state == State.Idle && haveRoute && DockedNow())
+    if (phase == PhaseId.Idle && haveRoute && DockedNow())
     {
         operating = true;
         bool atHome = AtHomeEnd();
         if (runMode == RunMode.OneWay)
-            state = atHome ? State.Loading : State.UndockDest;
+        {
+            if (atHome) SwitchPhase(PhaseId.Loading);
+            else { leg.Outbound = false; SwitchPhase(PhaseId.Undock); }
+        }
         else
-            state = atHome ? State.Loading : State.Unloading;
+            SwitchPhase(atHome ? PhaseId.Loading : PhaseId.Unloading);
         phaseTimer = 0;
         departRequested = true;
         statusMsg = "Departing now";
@@ -1467,7 +1578,7 @@ string BuildHeader()
       .Append((ShipMassKg() / 1000.0).ToString("0")).Append("t ")
       .Append((rc != null ? rc.GetShipSpeed() : 0).ToString("0")).Append("m/s\n");
     sb.Append(haveRoute ? ("Route " + path.Count + "wp") : "Route: none").Append('\n');
-    if (state == State.CruiseToDest || state == State.CruiseToHome)
+    if (phase == PhaseId.Cruise)
         sb.Append("ETA ").Append(FormatEta()).Append(' ')
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg).Append('\n');
@@ -1501,7 +1612,7 @@ string BuildTrip()
     sb.Append("-- Trip --\n");
     sb.Append(haveRoute ? ("Route " + path.Count + "wp") : "Route: none").Append('\n');
     sb.Append("Phase: ").Append(ShipState()).Append('\n');
-    if (state == State.CruiseToDest || state == State.CruiseToHome)
+    if (phase == PhaseId.Cruise)
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg);
@@ -1509,20 +1620,10 @@ string BuildTrip()
 }
 string ShipState()
 {
-    switch (state)
-    {
-        case State.Loading:      return "Loading";
-        case State.UndockHome:   return "Undock";
-        case State.CruiseToDest: return "Cruise >";
-        case State.ApproachDest: return "Docking >";
-        case State.Unloading:    return "Unloading";
-        case State.UndockDest:   return "Undock";
-        case State.CruiseToHome: return "Cruise <";
-        case State.ApproachHome: return "Docking <";
-        case State.Recording:    return "Recording";
-        case State.Faulted:      return "FAULT";
-        default:                 return "Idle";
-    }
+    string lbl = phases[phase].Label;
+    if (phase == PhaseId.Cruise || phase == PhaseId.Approach)
+        return lbl + (leg.Outbound ? " >" : " <");
+    return lbl;
 }
 void SizeAndWrite(ScreenTarget t, string text)
 {
@@ -1575,7 +1676,7 @@ string WrapText(string text, int cols)
 void Broadcast()
 {
     double distM = 0; int etaSec = -1;
-    if (state == State.CruiseToDest || state == State.CruiseToHome)
+    if (phase == PhaseId.Cruise)
     {
         distM = RemainingDistance();
         double spd = rc.GetShipSpeed();
@@ -1584,7 +1685,7 @@ void Broadcast()
     string msg = string.Join("|", new[]
     {
         shipName,
-        state.ToString(),
+        LegacyStateName(),
         etaSec.ToString(),
         ((int)distM).ToString(),
         CargoFillPct().ToString("0"),
@@ -1878,7 +1979,17 @@ void LoadState()
 {
     var ini = new MyIni();
     if (!ini.TryParse(Me.CustomData) || !ini.ContainsSection("state")) return;
-    Enum.TryParse(ini.Get("state", "state").ToString("Idle"), out state);
+    if (ini.ContainsKey("state", "phase"))
+    {
+        PhaseId p;
+        if (!Enum.TryParse(ini.Get("state", "phase").ToString("Idle"), out p)) p = PhaseId.Idle;
+        phase = p;
+        leg.Outbound = ini.Get("state", "outbound").ToBoolean(true);
+    }
+    else
+    {
+        ApplyLegacyState(ini.Get("state", "state").ToString("Idle"));
+    }
     operating = ini.Get("state", "operating").ToBoolean(false);
     phaseTimer = ini.Get("state", "phaseTimer").ToDouble(0);
     estHydroOut = ini.Get("state", "estHydroOut").ToDouble(0);
