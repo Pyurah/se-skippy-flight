@@ -340,6 +340,10 @@ and detects the climb-out plateau and the descent to the dock. Fully automatic �
       now zeroes `boundaryFor` for a clean Cruise → Descent dwell. IGC wire unchanged.
 - [x] Rebuild + budget check: **94,451 chars (5,549 headroom, +1,014 vs 0.7.0)**, braces balanced
       (493/493). Version → 0.8.0.
+- [x] **In-world validation (2026-08-14).** Flew a PlanetLocal pad→pad route on Earth
+      (Climb→Cruise→Descent on the altitude trend) and a planet↔space station round trip
+      (Ascent/Descent gravity boundaries) — both clean with the shipped defaults
+      (`CLIMB_MIN_DIST` 100 m / `LEVEL_RATE` 0.75 / `DESCENT_RATE` 1.5). No calibration change needed.
 
 #### Fix — depart/start from an unrelated dock (v0.8.1)
 
