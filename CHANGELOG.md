@@ -4,6 +4,43 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-08-14
+
+### Fixed
+- **`DepartStaging` no longer swings 57↔113° for the full watchdog before committing to
+  cruise.** On a space leg the ship reached the staging fix, began its turn to the route
+  heading, then oscillated wildly (attitude error alternating ~57° and ~113° at 0 m/s in
+  0 g) for ~45 s until the `APPROACH_TIMEOUT` force-switched it into cruise — which then flew
+  fine. Three compounding faults, all fixed:
+  - **Target ping-pong.** `atFix` was recomputed each tick from a bare 3 m threshold with no
+    hysteresis. The attitude target was the *route heading* when `atFix` was true and the
+    *recorded dock pose* when false, and the two are ~57° apart. Sub-metre drift toggled the
+    flag every few ticks, so the gyros chased first one target then the other and never
+    settled. Now a latch (`stagingAtFix`) arms at <3 m and only disarms on a real drift back
+    out (>8 m); once the fix is reached the ship commits to the route heading and never
+    reverts to the dock attitude on small drift.
+  - **Unattainable precision in space.** The staging turn ran through `FlyToPose`, whose
+    completion test demands `ALIGN_TOL` (~1.7°) precision — which in space is impossible (the
+    nose target inches around and the gyros hunt it forever, the same reason cruise uses
+    coast-hold). So the confirm dwell never latched. The turn now aligns with the **same
+    coast-hold law cruise holds** (`AlignTo(..., coastHold: true)`) and confirms at
+    `COAST_HOLD_WAKE` tolerance.
+  - **No station-keeping during the turn.** `FlyToPose` withholds all translation while
+    misaligned (align ≥ `ALIGN_MOVE_TOL`, ~12°), so during the 57° turn the ship — dampeners
+    off in flight — coasted off the fix, which is exactly what re-toggled the old `atFix`
+    flag. A new `StationKeep(pos)` helper nulls residual velocity and cancels gravity
+    independent of attitude, so the ship holds the fix *while* it turns.
+- **ETA no longer prints twice on the status LCD.** The cruise status line appended
+  `"  ETA hh:mm"` on top of the dedicated `ETA hh:mm <dist>km` header line, so the front LCD
+  showed the ETA in two places — and the extra text could force the panel to resize to fit.
+  The cruise `statusMsg` is now just `Cruising to destination` / `Cruising home`; the ETA is
+  shown only on its dedicated header line.
+
+### Notes
+- Bug fix only; no new behavior, no new config. The departure anti-dive guarantee is
+  unchanged (Undock still only clears the connector; the route-heading turn still happens at
+  the staging fix). Version constant bumped to 0.5.1.
+
 ## [0.5.0] - 2026-08-14
 
 Slice b — **staging, holding & taxi (the anti-dive guarantee).** The ship no longer flies

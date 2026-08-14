@@ -1,4 +1,4 @@
-const string VERSION = "0.5.0";
+const string VERSION = "0.5.1";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -72,7 +72,7 @@ class DepartStagingPhase : FlightPhase
     public override PhaseId Id { get { return PhaseId.DepartStaging; } }
     public override bool IsFlightControl { get { return true; } }
     public override string Label { get { return "Staging"; } }
-    public override void Enter(Program p) { p.stageStableFor = 0; }
+    public override void Enter(Program p) { p.stageStableFor = 0; p.stagingAtFix = false; }
     public override void Tick(Program p) { p.TickDepartStaging(); }
 }
 class CruisePhase : FlightPhase
@@ -183,6 +183,7 @@ bool gyroResting = false;
 double dockBlockTimer = 0;
 double dockClearFor = 0;
 double stageStableFor = 0;
+bool stagingAtFix = false;
 const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
 int menuPage = PAGE_MAIN;
@@ -677,9 +678,11 @@ void TickDepartStaging()
     bool fromHome = leg.Outbound;
     DockPose p = fromHome ? homePose : destPose;
     Vector3D staging = HoldPoint(p);
-    bool atFix = Vector3D.Distance(rc.GetPosition(), staging) < 3.0;
+    double distToFix = Vector3D.Distance(rc.GetPosition(), staging);
+    if (!stagingAtFix && distToFix < 3.0) stagingAtFix = true;
+    else if (stagingAtFix && distToFix > 8.0) stagingAtFix = false;
     Vector3D faceFwd = p.Fwd, faceUp = p.Up;
-    if (atFix)
+    if (stagingAtFix)
     {
         Vector3D toTarget = FirstCruiseTarget(fromHome) - staging;
         if (toTarget.LengthSquared() > 1)
@@ -709,16 +712,26 @@ void TickDepartStaging()
             }
         }
     }
-    bool posed = FlyToPose(staging, faceFwd, faceUp, 1.0);
-    if (atFix && posed) stageStableFor += dt;
-    else stageStableFor = 0;
+    if (stagingAtFix)
+    {
+        double align = AlignTo(faceFwd, faceUp, true);
+        StationKeep(staging);
+        bool posed = align < COAST_HOLD_WAKE && distToFix < 3.0;
+        if (posed) stageStableFor += dt; else stageStableFor = 0;
+        statusMsg = "Staging - aligning for cruise";
+    }
+    else
+    {
+        FlyToPose(staging, faceFwd, faceUp, 1.0);
+        stageStableFor = 0;
+        statusMsg = fromHome ? "Departing home" : "Departing station";
+    }
     phaseTimer += dt;
-    statusMsg = atFix ? "Staging - aligning for cruise"
-                      : (fromHome ? "Departing home" : "Departing station");
     if (stageStableFor >= STAGE_CONFIRM_SEC || phaseTimer >= APPROACH_TIMEOUT)
     {
         ReleaseControl();
         phaseTimer = 0;
+        stagingAtFix = false;
         SwitchPhase(PhaseId.Cruise);
     }
 }
@@ -733,7 +746,7 @@ void TickCruise()
     if (!CruiseArmed(toDest)) { ArmCruise(toDest); return; }
     cruiseProgTimer += dt;
     bool done = RunCruiseControl();
-    statusMsg = (toDest ? "Cruising to destination" : "Cruising home") + "  ETA " + FormatEta();
+    statusMsg = toDest ? "Cruising to destination" : "Cruising home";
     if (done)
     {
         cruiseArmed = false;
@@ -1022,6 +1035,23 @@ bool FlyToPose(Vector3D pos, Vector3D fwd, Vector3D up, double arriveDist)
     Vector3D force = (desiredVel - vel) * mass * VEL_GAIN - grav * mass;
     ApplyForce(force);
     return dist <= arriveDist && align < ALIGN_TOL && vel.Length() < ARRIVE_SPEED;
+}
+void StationKeep(Vector3D pos)
+{
+    SetDampeners(false);
+    Vector3D toTarget = pos - rc.GetPosition();
+    double dist = toTarget.Length();
+    Vector3D grav = rc.GetNaturalGravity();
+    double mass = rc.CalculateShipMass().PhysicalMass;
+    Vector3D desiredVel = Vector3D.Zero;
+    if (dist > 0.05)
+    {
+        double speedCap = Math.Min((double)dockSpeed, dist * APPROACH_KP);
+        desiredVel = toTarget / dist * speedCap;
+    }
+    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
+    Vector3D force = (desiredVel - vel) * mass * VEL_GAIN - grav * mass;
+    ApplyForce(force);
 }
 double AlignTo(Vector3D targetFwd, Vector3D targetUp) => AlignTo(targetFwd, targetUp, GyroCapRad(), false);
 double AlignTo(Vector3D targetFwd, Vector3D targetUp, bool coastHold) => AlignTo(targetFwd, targetUp, GyroCapRad(), coastHold);

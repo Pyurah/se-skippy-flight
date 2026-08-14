@@ -7,7 +7,7 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.5.0 (Slice b delivered — `DepartStaging`/`Holding`/`Taxi` phases with derived
+- **Version:** 0.5.1 (Slice b delivered + DepartStaging staging-turn fix — `DepartStaging`/`Holding`/`Taxi` phases with derived
   outer stand-off fixes and the local clearance gate. The ship assembles at a staging fix before
   flying and holds at an arrival fix before docking; only the clearance-gated `Taxi` phase ever
   touches a connector. Reorientation to the dock attitude is gravity-gated. Plus Slice a's
@@ -189,6 +189,8 @@ Baseline (v0.1.0, unmodified copy): stripped **70,780 chars**, **29,220** headro
 After Slice a (v0.2.0, phase objects): stripped **75,112 chars**, **24,888** headroom (+4,332).
 After Slice b (v0.5.0, staging/holding/taxi): stripped **87,841 chars**, **12,159** headroom
 (+4,368 vs 0.4.1; the intervening named-routes and telemetry extras account for the rest).
+After the v0.5.1 DepartStaging fix: stripped **88,862 chars**, **11,138** headroom (+1,021;
+the `stagingAtFix` latch, coast-hold staging turn, and `StationKeep` helper).
 
 ---
 

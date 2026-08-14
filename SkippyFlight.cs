@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.5.0";
+const string VERSION = "0.5.1";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -173,7 +173,7 @@ class DepartStagingPhase : FlightPhase
     public override PhaseId Id { get { return PhaseId.DepartStaging; } }
     public override bool IsFlightControl { get { return true; } }
     public override string Label { get { return "Staging"; } }
-    public override void Enter(Program p) { p.stageStableFor = 0; }
+    public override void Enter(Program p) { p.stageStableFor = 0; p.stagingAtFix = false; }
     public override void Tick(Program p) { p.TickDepartStaging(); }
 }
 
@@ -317,6 +317,7 @@ bool gyroResting = false;                        // latch: gyros held inert on-h
 double dockBlockTimer = 0;                        // s the docking corridor has read continuously blocked (see TickHolding/TickTaxi); drives the optional dockBlockSec give-up and the status readout
 double dockClearFor = 0;                          // s the corridor has read clear since a block; must exceed CLEAR_CONFIRM_SEC before a held approach resumes, so we don't lurch forward at a ship still crossing
 double stageStableFor = 0;                        // s the ship has held assembled+aligned at the departure staging fix; must exceed STAGE_CONFIRM_SEC before it commits to cruise (assemble-before-flying, not dive-off-the-pad)
+bool stagingAtFix = false;                         // latched once the ship first reaches the staging fix; from then on it turns to the route heading and never reverts to the dock attitude on sub-metre drift (kills the 57<->113 deg target ping-pong in space). Reset on DepartStaging entry/exit.
 
 // ---- Display views (ship role) ---------------------------------------------
 // Each ship screen shows ONE view, so a 3-screen cockpit can split the display
@@ -989,12 +990,20 @@ void TickDepartStaging()
     bool fromHome = leg.Outbound;
     DockPose p = fromHome ? homePose : destPose;
     Vector3D staging = HoldPoint(p);
+    double distToFix = Vector3D.Distance(rc.GetPosition(), staging);
 
-    // Hold the recorded docked attitude until we've reached the staging fix; only then
-    // turn toward the route, so we don't pitch while still close to the structure.
-    bool atFix = Vector3D.Distance(rc.GetPosition(), staging) < 3.0;
+    // Latch "reached the staging fix" with hysteresis: arm at <3 m and, once armed, only
+    // disarm on a real drift back out (>8 m). Without this, a bare 3 m threshold toggled on
+    // sub-metre drift and flipped the attitude target between the dock pose (atFix false) and
+    // the route heading (atFix true) every few ticks - the gyros ping-ponged between two
+    // targets ~57 deg apart and the ship swung 57<->113 deg for the full watchdog in space
+    // (0 g, 0 m/s) before timing out into cruise. Once we've reached the fix we commit to the
+    // route heading and never revert to the dock attitude on small drift.
+    if (!stagingAtFix && distToFix < 3.0) stagingAtFix = true;
+    else if (stagingAtFix && distToFix > 8.0) stagingAtFix = false;
+
     Vector3D faceFwd = p.Fwd, faceUp = p.Up;
-    if (atFix)
+    if (stagingAtFix)
     {
         Vector3D toTarget = FirstCruiseTarget(fromHome) - staging;
         if (toTarget.LengthSquared() > 1)
@@ -1033,18 +1042,41 @@ void TickDepartStaging()
         }
     }
 
-    bool posed = FlyToPose(staging, faceFwd, faceUp, 1.0);
-    if (atFix && posed) stageStableFor += dt;   // settled at the fix, aligned to the route
-    else stageStableFor = 0;
+    if (stagingAtFix)
+    {
+        // At the fix: rotate to the route heading with the SAME coast-hold law cruise uses,
+        // and station-keep position INDEPENDENTLY of alignment. Two reasons this doesn't go
+        // through FlyToPose here:
+        //   1. Precision alignment (ALIGN_TOL, ~1.7 deg) is unattainable in space - the nose
+        //      target inches around and the gyros hunt it forever, so `posed` never latched
+        //      and the ship never confirmed the dwell. Coast-hold (COAST_HOLD_ENTER ~2.9 deg,
+        //      wide hysteresis) is exactly what cruise holds, so match it.
+        //   2. FlyToPose withholds translation while align >= ALIGN_MOVE_TOL (~12 deg). During
+        //      a 57 deg turn that means NO station-keeping - the ship coasts off the fix
+        //      (dampeners are off in flight), which is what toggled the old atFix flag.
+        //      StationKeep nulls the drift regardless of attitude, so the fix holds while we turn.
+        double align = AlignTo(faceFwd, faceUp, true);
+        StationKeep(staging);
+        bool posed = align < COAST_HOLD_WAKE && distToFix < 3.0;
+        if (posed) stageStableFor += dt; else stageStableFor = 0;
+        statusMsg = "Staging - aligning for cruise";
+    }
+    else
+    {
+        // Still flying out to the fix: hold the recorded docked attitude, no rotation, so we
+        // don't pitch while still close to the structure (the departure anti-dive guarantee).
+        FlyToPose(staging, faceFwd, faceUp, 1.0);
+        stageStableFor = 0;
+        statusMsg = fromHome ? "Departing home" : "Departing station";
+    }
 
     phaseTimer += dt;
-    statusMsg = atFix ? "Staging - aligning for cruise"
-                      : (fromHome ? "Departing home" : "Departing station");
 
     if (stageStableFor >= STAGE_CONFIRM_SEC || phaseTimer >= APPROACH_TIMEOUT)
     {
         ReleaseControl();
         phaseTimer = 0;
+        stagingAtFix = false;
         SwitchPhase(PhaseId.Cruise);
     }
 }
@@ -1065,7 +1097,7 @@ void TickCruise()
 
     cruiseProgTimer += dt;
     bool done = RunCruiseControl();
-    statusMsg = (toDest ? "Cruising to destination" : "Cruising home") + "  ETA " + FormatEta();
+    statusMsg = toDest ? "Cruising to destination" : "Cruising home";
 
     if (done)
     {
@@ -1513,6 +1545,31 @@ bool FlyToPose(Vector3D pos, Vector3D fwd, Vector3D up, double arriveDist)
     ApplyForce(force);
 
     return dist <= arriveDist && align < ALIGN_TOL && vel.Length() < ARRIVE_SPEED;
+}
+
+// Hold position at a fixed point with the thrusters (null residual velocity + cancel
+// gravity), INDEPENDENT of attitude. Unlike FlyToPose, it does not gate translation on
+// alignment - so DepartStaging can keep the ship parked on its staging fix WHILE the gyros
+// turn it to the route heading, instead of coasting off the fix during the turn (dampeners
+// are off in flight). Same velocity->thrust law as FlyToPose's translation block.
+void StationKeep(Vector3D pos)
+{
+    SetDampeners(false);
+    Vector3D toTarget = pos - rc.GetPosition();
+    double dist = toTarget.Length();
+    Vector3D grav = rc.GetNaturalGravity();
+    double mass = rc.CalculateShipMass().PhysicalMass;
+
+    Vector3D desiredVel = Vector3D.Zero;
+    if (dist > 0.05)
+    {
+        double speedCap = Math.Min((double)dockSpeed, dist * APPROACH_KP);
+        desiredVel = toTarget / dist * speedCap;
+    }
+
+    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
+    Vector3D force = (desiredVel - vel) * mass * VEL_GAIN - grav * mass;
+    ApplyForce(force);
 }
 
 // PD cross-product attitude controller. The P term rotates toward the target
