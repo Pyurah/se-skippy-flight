@@ -1,4 +1,4 @@
-const string VERSION = "0.6.0";
+const string VERSION = "0.7.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -10,6 +10,7 @@ struct DockPose
     public Vector3D ConnFwd;
     public long BaseGridId;
     public double HoldDist;
+    public double Grav;
 }
 enum PhaseId
 {
@@ -19,6 +20,8 @@ enum PhaseId
     Undock,
     DepartStaging,
     Cruise,
+    Climb,
+    Descent,
     Holding,
     Taxi,
     Approach,
@@ -28,6 +31,13 @@ enum PhaseId
 struct Leg
 {
     public bool Outbound;
+}
+enum Scenario
+{
+    PlanetLocal,
+    Ascent,
+    Descent,
+    SpaceLocal
 }
 abstract class FlightPhase
 {
@@ -82,6 +92,22 @@ class CruisePhase : FlightPhase
     public override string Label { get { return "Cruise"; } }
     public override void Tick(Program p) { p.TickCruise(); }
 }
+class ClimbPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Climb; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Climbing"; } }
+    public override void Enter(Program p) { p.boundaryFor = 0; }
+    public override void Tick(Program p) { p.TickClimb(); }
+}
+class DescentPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Descent; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Descending"; } }
+    public override void Enter(Program p) { p.boundaryFor = 0; }
+    public override void Tick(Program p) { p.TickDescent(); }
+}
 class HoldingPhase : FlightPhase
 {
     public override PhaseId Id { get { return PhaseId.Holding; } }
@@ -131,6 +157,8 @@ string loadTag = "[SF:LOAD]";
 string unloadTag = "[SF:UNLOAD]";
 string lcdTag = "[SF]";
 float cruiseSpeed = 100f;
+float climbSpeed = 100f;
+float descentSpeed = 100f;
 float dockSpeed = 5f;
 double maxMassKg = 0;
 double departFill = 95;
@@ -162,6 +190,9 @@ string recordName = "";
 List<string> routeNames = new List<string>();
 PhaseId phase = PhaseId.Idle;
 Leg leg;
+Scenario legScenario = Scenario.SpaceLocal;
+Vector3D legStartPos;
+public double boundaryFor = 0;
 Dictionary<PhaseId, FlightPhase> phases;
 bool operating = false;
 string statusMsg = "Idle";
@@ -233,6 +264,10 @@ const double COAST_HOLD_WAKE = 0.10;
 const double COAST_TOL = 0.5;
 const double CRUISE_COAST_BAND = 5.0;
 const double VEL_DEADBAND = 0.4;
+const double GRAV_EPS = 1e-3;
+const double BOUNDARY_CONFIRM_SEC = 2.0;
+const double PLANET_CLIMB_DIST = 500;
+const double PLANET_DESCENT_DIST = 500;
 const double CLEAR_CONE_DOT = 0.70;
 const double CLEAR_CONFIRM_SEC = 1.5;
 const double STAGE_CONFIRM_SEC = 1.5;
@@ -249,6 +284,8 @@ Program()
         { PhaseId.Undock,        new UndockPhase() },
         { PhaseId.DepartStaging, new DepartStagingPhase() },
         { PhaseId.Cruise,        new CruisePhase() },
+        { PhaseId.Climb,         new ClimbPhase() },
+        { PhaseId.Descent,       new DescentPhase() },
         { PhaseId.Holding,       new HoldingPhase() },
         { PhaseId.Taxi,          new TaxiPhase() },
         { PhaseId.Approach,      new ApproachPhase() },
@@ -332,6 +369,8 @@ string LegacyStateName()
         case PhaseId.Undock:        return leg.Outbound ? "UndockHome"   : "UndockDest";
         case PhaseId.DepartStaging: return leg.Outbound ? "UndockHome"   : "UndockDest";
         case PhaseId.Cruise:        return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
+        case PhaseId.Climb:         return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
+        case PhaseId.Descent:       return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
         case PhaseId.Holding:       return leg.Outbound ? "ApproachDest" : "ApproachHome";
         case PhaseId.Taxi:          return leg.Outbound ? "ApproachDest" : "ApproachHome";
         case PhaseId.Approach:      return leg.Outbound ? "ApproachDest" : "ApproachHome";
@@ -528,7 +567,8 @@ DockPose CapturePose(IMyShipConnector c)
         Up      = rc.WorldMatrix.Up,
         ConnFwd = c.WorldMatrix.Forward,
         BaseGridId = (c.Status == MyShipConnectorStatus.Connected && c.OtherConnector != null)
-                     ? c.OtherConnector.CubeGrid.EntityId : 0
+                     ? c.OtherConnector.CubeGrid.EntityId : 0,
+        Grav = rc.GetNaturalGravity().Length()
     };
 }
 void TickRecording()
@@ -732,7 +772,7 @@ void TickDepartStaging()
         ReleaseControl();
         phaseTimer = 0;
         stagingAtFix = false;
-        SwitchPhase(PhaseId.Cruise);
+        SwitchPhase(FirstCruisePhase());
     }
 }
 Vector3D FirstCruiseTarget(bool toDest)
@@ -740,13 +780,16 @@ Vector3D FirstCruiseTarget(bool toDest)
     BuildLeg(toDest);
     return legWps[0];
 }
-void TickCruise()
+void TickCruise()   { RunCruiseFamily(); }
+void TickClimb()    { RunCruiseFamily(); }
+void TickDescent()  { RunCruiseFamily(); }
+void RunCruiseFamily()
 {
     bool toDest = leg.Outbound;
     if (!CruiseArmed(toDest)) { ArmCruise(toDest); return; }
     cruiseProgTimer += dt;
     bool done = RunCruiseControl();
-    statusMsg = toDest ? "Cruising to destination" : "Cruising home";
+    statusMsg = CruiseStatus();
     if (done)
     {
         cruiseArmed = false;
@@ -761,7 +804,76 @@ void TickCruise()
         ReleaseControl();
         SwitchPhase(PhaseId.Faulted);
         statusMsg = "Cruise stuck - check thrust/gyro/geometry";
+        return;
     }
+    if (BoundaryReady()) SwitchPhase(NextCruisePhase());
+}
+double CruiseCap()
+{
+    if (phase == PhaseId.Climb) return climbSpeed;
+    if (phase == PhaseId.Descent) return descentSpeed;
+    return cruiseSpeed;
+}
+bool InCruiseFamily()
+{
+    return phase == PhaseId.Cruise || phase == PhaseId.Climb || phase == PhaseId.Descent;
+}
+string CruiseStatus()
+{
+    bool toDest = leg.Outbound;
+    string verb = phase == PhaseId.Climb ? "Climbing"
+                : phase == PhaseId.Descent ? "Descending" : "Cruising";
+    return verb + (toDest ? " to destination" : " home");
+}
+Scenario Classify(double fromG, double toG)
+{
+    bool f = fromG > GRAV_EPS, t = toG > GRAV_EPS;
+    if (f && t) return Scenario.PlanetLocal;
+    if (f && !t) return Scenario.Ascent;
+    if (!f && t) return Scenario.Descent;
+    return Scenario.SpaceLocal;
+}
+Scenario ClassifyLeg()
+{
+    double fromG = leg.Outbound ? homePose.Grav : destPose.Grav;
+    double toG   = leg.Outbound ? destPose.Grav : homePose.Grav;
+    return Classify(fromG, toG);
+}
+PhaseId FirstCruisePhase()
+{
+    legScenario = ClassifyLeg();
+    return (legScenario == Scenario.PlanetLocal || legScenario == Scenario.Ascent)
+           ? PhaseId.Climb : PhaseId.Cruise;
+}
+PhaseId NextCruisePhase()
+{
+    if (phase == PhaseId.Climb) return PhaseId.Cruise;
+    if (phase == PhaseId.Cruise) return PhaseId.Descent;
+    return phase;
+}
+bool BoundaryReady()
+{
+    if (rc == null) return false;
+    double gMag = rc.GetNaturalGravity().Length();
+    if (phase == PhaseId.Climb)
+    {
+        if (legScenario == Scenario.PlanetLocal)
+            return Vector3D.Distance(rc.GetPosition(), legStartPos) > PLANET_CLIMB_DIST;
+        boundaryFor = gMag < GRAV_EPS ? boundaryFor + dt : 0;
+        return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+    }
+    if (phase == PhaseId.Cruise)
+    {
+        if (legScenario == Scenario.PlanetLocal)
+            return RemainingDistance() < PLANET_DESCENT_DIST;
+        if (legScenario == Scenario.Descent)
+        {
+            boundaryFor = gMag > GRAV_EPS ? boundaryFor + dt : 0;
+            return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+        }
+        return false;
+    }
+    return false;
 }
 bool cruiseArmedToDest = false;
 bool cruiseArmed = false;
@@ -783,6 +895,9 @@ void ArmCruise(bool toDest)
         return;
     }
     BuildVelocityProfile();
+    legScenario = ClassifyLeg();
+    legStartPos = rc.GetPosition();
+    boundaryFor = 0;
     cruiseIdx = 0;
     cruiseProgTimer = 0;
     cruiseBestDist = double.MaxValue;
@@ -889,7 +1004,7 @@ bool RunCruiseControl()
     }
     double vmax = legVmax[cruiseIdx];
     double vBrake = Math.Sqrt(vmax * vmax + 2.0 * cruiseAccel * dist);
-    double speed = Math.Min(cruiseSpeed, vBrake);
+    double speed = Math.Min(CruiseCap(), vBrake);
     Vector3D fwdTarget, upTarget;
     bool inGrav = grav.LengthSquared() > 1e-3;
     if (inGrav && UseLevelFlight())
@@ -1775,7 +1890,7 @@ string BuildHeader()
     sb.Append(haveRoute
         ? ("Route " + (activeRoute != "" ? activeRoute + " " : "") + path.Count + "wp")
         : "Route: none").Append('\n');
-    if (phase == PhaseId.Cruise)
+    if (InCruiseFamily())
         sb.Append("ETA ").Append(FormatEta()).Append(' ')
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg).Append('\n');
@@ -1811,7 +1926,7 @@ string BuildTrip()
         ? ("Route " + (activeRoute != "" ? activeRoute + " " : "") + path.Count + "wp")
         : "Route: none").Append('\n');
     sb.Append("Phase: ").Append(ShipState()).Append('\n');
-    if (phase == PhaseId.Cruise)
+    if (InCruiseFamily())
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg);
@@ -1830,7 +1945,7 @@ string BuildTelem()
       .Append("  t=").Append(phaseTimer.ToString("0.0")).Append("s\n");
     sb.Append("Spd ").Append(spd.ToString("0.0")).Append("m/s");
     if (cruiseArmed && cruiseIdx < legVmax.Count)
-        sb.Append(" /").Append(legVmax[cruiseIdx].ToString("0")).Append("cap");
+        sb.Append(" /").Append(Math.Min(CruiseCap(), legVmax[cruiseIdx]).ToString("0")).Append("cap");
     sb.Append('\n');
     if (gMag > 1e-3)
     {
@@ -1860,7 +1975,8 @@ string BuildTelem()
 string ShipState()
 {
     string lbl = phases[phase].Label;
-    if (phase == PhaseId.DepartStaging || phase == PhaseId.Cruise || phase == PhaseId.Holding
+    if (phase == PhaseId.DepartStaging || phase == PhaseId.Cruise || phase == PhaseId.Climb
+        || phase == PhaseId.Descent || phase == PhaseId.Holding
         || phase == PhaseId.Taxi || phase == PhaseId.Approach)
         return lbl + (leg.Outbound ? " >" : " <");
     return lbl;
@@ -1916,7 +2032,7 @@ string WrapText(string text, int cols)
 void Broadcast()
 {
     double distM = 0; int etaSec = -1;
-    if (phase == PhaseId.Cruise)
+    if (InCruiseFamily())
     {
         distM = RemainingDistance();
         double spd = rc.GetShipSpeed();
@@ -2045,6 +2161,8 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("sf", "unloadTag", unloadTag);
     ini.Set("sf", "lcdTag", lcdTag);
     ini.Set("sf", "cruiseSpeed", cruiseSpeed);
+    ini.Set("sf", "climbSpeed", climbSpeed);
+    ini.Set("sf", "descentSpeed", descentSpeed);
     ini.Set("sf", "dockSpeed", dockSpeed);
     ini.Set("sf", "maxMassKg", maxMassKg);
     ini.Set("sf", "departFill", departFill);
@@ -2088,6 +2206,8 @@ void LoadConfig()
     unloadTag = ini.Get("sf", "unloadTag").ToString(ini.Get("sf", "unloadSorter").ToString(unloadTag));
     lcdTag = ini.Get("sf", "lcdTag").ToString(lcdTag);
     cruiseSpeed = (float)ini.Get("sf", "cruiseSpeed").ToDouble(cruiseSpeed);
+    climbSpeed = (float)Clamp(ini.Get("sf", "climbSpeed").ToDouble(cruiseSpeed), 5, cruiseSpeed);
+    descentSpeed = (float)Clamp(ini.Get("sf", "descentSpeed").ToDouble(cruiseSpeed), 5, cruiseSpeed);
     dockSpeed = (float)ini.Get("sf", "dockSpeed").ToDouble(dockSpeed);
     maxMassKg = ini.Get("sf", "maxMassKg").ToDouble(maxMassKg);
     departFill = ini.Get("sf", "departFill").ToDouble(departFill);
@@ -2159,6 +2279,8 @@ void WriteRoute(MyIni ini, string name)
     ini.Set(s, "destBaseId", destPose.BaseGridId);
     ini.Set(s, "homeHoldDist", homePose.HoldDist);
     ini.Set(s, "destHoldDist", destPose.HoldDist);
+    ini.Set(s, "homeG", homePose.Grav);
+    ini.Set(s, "destG", destPose.Grav);
     var sb = new StringBuilder();
     for (int i = 0; i < path.Count; i++) { if (i > 0) sb.Append(';'); sb.Append(Vec(path[i])); }
     ini.Set(s, "path", sb.ToString());
@@ -2196,7 +2318,7 @@ void MigrateLegacyRoute(MyIni ini)
     {
         string[] keys = { "homeConn", "destConn", "homePos", "homeFwd", "homeUp", "homeConnFwd",
                           "destPos", "destFwd", "destUp", "destConnFwd", "homeBaseId", "destBaseId",
-                          "homeHoldDist", "destHoldDist", "path", "homeDock", "destDock" };
+                          "homeHoldDist", "destHoldDist", "homeG", "destG", "path", "homeDock", "destDock" };
         string dst = RouteSec("Main");
         foreach (var key in keys)
         {
@@ -2226,6 +2348,8 @@ void LoadRouteInto(MyIni ini, string name)
     destPose.BaseGridId = ini.Get(s, "destBaseId").ToInt64(0);
     homePose.HoldDist = ini.Get(s, "homeHoldDist").ToDouble(0);
     destPose.HoldDist = ini.Get(s, "destHoldDist").ToDouble(0);
+    homePose.Grav = ini.Get(s, "homeG").ToDouble(0);
+    destPose.Grav = ini.Get(s, "destG").ToDouble(0);
     path.Clear();
     var raw = ini.Get(s, "path").ToString("");
     if (!string.IsNullOrEmpty(raw))

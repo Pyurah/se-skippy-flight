@@ -4,10 +4,12 @@ An autonomous two-connector **delivery shuttle** script for Space Engineers: a s
 cargo between two docking points — for example, a planet base and an orbital station — flying the
 whole route itself, from undock to dock.
 
-SkippyFlight is built on a **phase-object flight model** (undock → staging → cruise → holding →
-taxi → dock). It assembles at a staging fix clear of the structure before flying and holds at an
-arrival fix before docking, so it never dives straight onto a connector. Scenario auto-detection
-(climb/descent for planet↔space routes) and a separate control tower for traffic management are
+SkippyFlight is built on a **phase-object flight model** (undock → staging → climb → cruise →
+descent → holding → taxi → dock). It assembles at a staging fix clear of the structure before
+flying and holds at an arrival fix before docking, so it never dives straight onto a connector.
+Each leg is **scenario-aware** — it detects from the two docks' gravity whether it's leaving a
+planet, entering one, hopping between planet docks, or staying in space, and stages the flight
+accordingly (see **Flight scenarios** below). A separate control tower for traffic management is
 being built out slice by slice — see [roadmap.md](roadmap.md).
 
 - **One file, two roles.** Paste the same script into the ship PB *and* the base PB. The
@@ -41,10 +43,10 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 3. Repeat for the base/station PB, but set `role = base`.
 
 > **Paste the `.min.cs`, not the `.cs`.** The fully commented source
-> [`SkippyFlight.cs`](SkippyFlight.cs) is **154,979 chars** — over the 100,000-char PB limit —
+> [`SkippyFlight.cs`](SkippyFlight.cs) is **165,569 chars** — over the 100,000-char PB limit —
 > so it won't compile in-game as-is. `python tools/build-min.py` generates
 > [`SkippyFlight.min.cs`](SkippyFlight.min.cs): the same code with comments and blank lines
-> stripped (~43 % smaller → **89,034 chars**, ~11 k under the cap). Keep editing
+> stripped (~44 % smaller → **93,437 chars**, ~6.5 k under the cap). Keep editing
 > `SkippyFlight.cs`; the min file is a generated artifact, rebuilt on every change. (In-game
 > compile errors then report line numbers against the min file, not the source.)
 
@@ -67,6 +69,8 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 | `unloadTag` | `[SF:UNLOAD]` | Sorters whose name **contains** this tag unload at the destination |
 | `lcdTag` | `[SF]` | LCDs whose name contains this tag show status |
 | `cruiseSpeed` | `100` | Cruise speed cap (m/s); the controller stays at or below this |
+| `climbSpeed` | `100` | Top-speed cap (m/s) while in the **Climb** stage of a leg that ascends out of gravity. Clamped to `(5, cruiseSpeed]`. Defaults to `cruiseSpeed`, so the climb governor does nothing until you lower it |
+| `descentSpeed` | `100` | Top-speed cap (m/s) while in the **Descent** stage of a leg that drops into gravity. Clamped to `(5, cruiseSpeed]`. Defaults to `cruiseSpeed`; lower it for a gentler braked descent into a planet dock |
 | `dockSpeed` | `5` | Final-approach speed cap (m/s, controller) |
 | `maxMassKg` | `0` | `0` = no gate; otherwise stop loading near this mass |
 | `departFill` | `95` | Cargo fill % that triggers departure |
@@ -122,6 +126,31 @@ costs ~2 waypoints while a twisty approach keeps full detail — the 250-waypoin
 where precision matters. If a route ever reports **"Path full"**, raise `segMeters` (coarser
 sampling) or `simplifyMeters` (more aggressive straightening) and re-record. Set
 `simplifyMeters = 0` to disable straightening and record densely.
+
+At `RECORD` time the script also captures the **natural-gravity magnitude** at each connector
+(`homeG`/`destG` in the route section). That's what drives scenario detection below — so a route
+recorded before 0.7.0 (which has no gravity keys) is treated as space↔space and flies a plain
+cruise. Re-record such a route once if you want climb/descent staging on it.
+
+## Flight scenarios
+
+Every leg is classified from the two docks' recorded gravity, then flown as the matching sequence
+of cruise-family stages. All three stages (**Climb / Cruise / Descent**) are the *same* flight
+controller over the *same* recorded path — they differ only in an optional per-stage speed cap
+(`climbSpeed` / `descentSpeed`) and the status label. The inbound leg is the outbound leg's mirror
+(an ascent home→dest is a descent dest→home) with no extra configuration.
+
+| Scenario | Detected from | Flight stages | Stage handoff |
+|---|---|---|---|
+| **SpaceLocal** | both docks in space | Cruise | — (identical to pre-0.7 behavior) |
+| **Ascent** | home in gravity, dest in space | Climb → Cruise | switches to Cruise once the ship clears the gravity well |
+| **Descent** | home in space, dest in gravity | Cruise → Descent | switches to Descent as the ship enters the gravity well |
+| **PlanetLocal** | both docks in the same gravity | Climb → Cruise → Descent | distance gates near departure and arrival (gravity barely changes within a planet) |
+
+The stage boundaries in this release are a coarse gravity/distance proxy; precise altitude-based
+handoffs arrive in a later slice. Because both governor caps default to `cruiseSpeed`, climb and
+descent fly at the same speed as cruise out of the box — lower `descentSpeed` (for example) only
+when you want a gentler braked drop into a planet dock.
 
 ## Commands (run-argument on the ship PB)
 

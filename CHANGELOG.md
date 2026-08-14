@@ -4,6 +4,64 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-08-14
+
+Slice c — **flight plan + scenario.** The single cruise phase is now scenario-aware: each leg is
+classified from the two docks' recorded gravity into one of four scenarios, and the cruise splits
+into **Climb → Cruise → Descent** stages as appropriate. The stages share the exact same flight
+law (`RunCruiseControl` over the same recorded path) — they differ only in an optional per-stage
+speed governor and the operator status label. Precise altitude-based stage boundaries and the
+handoff danger-zone status remain deferred to Slice d; this slice uses a coarse gravity / distance
+proxy.
+
+### Added
+- **`Climb` and `Descent` phases.** Selected automatically per leg scenario and advanced by a
+  gravity/distance boundary. They reuse the cruise controller, so attitude, cornering, braking
+  and the stuck-watchdog behave exactly as in `Cruise`. The status LCD shows `Climbing >` /
+  `Descending <` and the ETA/remaining-distance line now spans all three cruise-family stages.
+- **Scenario classification.** Each dock's natural-gravity magnitude is captured at record time
+  (`homeG`/`destG`, persisted per `[route.<name>]`). A leg is classified in flight order into:
+  - **SpaceLocal** (space↔space) → `Cruise` only — identical to pre-0.7 behavior.
+  - **Ascent** (gravity→space) → `Climb → Cruise`; Climb hands off once the ship leaves the
+    gravity well (`gMag` drops below the space threshold, held briefly to debounce).
+  - **Descent** (space→gravity) → `Cruise → Descent`; Descent engages as the ship enters the well.
+  - **PlanetLocal** (gravity↔gravity, same planet) → `Climb → Cruise → Descent`, staged on
+    monotonic distance gates (natural gravity barely changes within one planet, so the gravity
+    threshold never fires). A short hop degrades gracefully (Climb → Holding, no fault).
+  Because classification uses the leg's own from→to gravity, an outbound Ascent is automatically
+  an inbound Descent — no direction bookkeeping.
+- **`climbSpeed` / `descentSpeed` config** (`[sf]` section) — optional per-stage top-speed caps,
+  clamped to `(5, cruiseSpeed]`. **Both default to `cruiseSpeed`, so the governors are a no-op
+  out of the box** — Climb and Descent fly at today's speeds until you lower a cap (e.g. for a
+  gentler descent into a planet dock). File-only knobs; not surfaced in the LCD settings menu.
+
+### Changed
+- `DepartStaging` now hands off to the first cruise-family phase for the leg's scenario (`Climb`
+  or `Cruise`) instead of always `Cruise`. Manual/recovery entries that begin airborne still enter
+  `Cruise` directly, so a ship recovered mid-descent doesn't restart in `Climb`.
+- The telemetry `cap` readout shows the lower of the waypoint profile and the active governor, so
+  a lowered climb/descent cap is visible live.
+
+### Migration
+- **Existing routes keep working untouched.** A route recorded before 0.7.0 has no `homeG`/`destG`
+  keys → both read as 0 → classified **SpaceLocal** → flies `Cruise` only, exactly as before.
+  `homeG`/`destG` are added to the legacy single-`[route]` → `[route.Main]` migration key list, and
+  re-recording a route captures the gravity at each dock. No re-recording is required for correct
+  behavior on space routes.
+- New enum members (`Climb`/`Descent`) round-trip through `[state]` persistence automatically, and
+  a mid-flight recompile into either resumes on the correct stage (the governor is derived live
+  from the phase, not a cached field, so it survives the `Enter`-less resume path).
+
+### IGC wire
+- `Climb` and `Descent` report as `CruiseToDest` / `CruiseToHome` on the IGC channel, so a
+  Skippy-Shuttle base board (which predates these phases) still decodes a ship in either stage as
+  cruising. No wire-format change.
+
+### Notes
+- Stripped deploy size: 93,437 chars (6,563 under the 100,000 PB limit; +4,403 vs 0.6.0).
+  Braces balanced (488/488). Version constant bumped to 0.7.0. Pre-1.0 MINOR: additive and
+  backward-compatible thanks to the SpaceLocal-default classification.
+
 ## [0.6.0] - 2026-08-14
 
 Block-tag and config-section rename — the script no longer calls itself "shuttle" on the

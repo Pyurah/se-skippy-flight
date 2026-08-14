@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.6.0";
+const string VERSION = "0.7.0";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -79,6 +79,7 @@ struct DockPose
     public Vector3D ConnFwd;  // bound connector's world forward (points into the dock)
     public long BaseGridId;   // EntityId of the static grid this dock belongs to; lets the clearance raycast tell the base from a foreign ship parked on the connector (0 = unknown / pre-0.15 route)
     public double HoldDist;   // per-dock override [m] for the outer staging/holding fix distance; 0 = use the global holdDist. Set by hand in the route section for docks where the global stand-off isn't clear of the geometry.
+    public double Grav;       // natural-gravity magnitude [m/s^2] captured at record time; classifies the dock as in-gravity (> GRAV_EPS) or space. 0 on pre-0.7 routes -> classified as space (harmless: SpaceLocal = today's single-Cruise behavior).
 }
 // A flight phase, decoupled from direction. What used to be the direction-baked
 // State enum (UndockHome/UndockDest, CruiseToDest/CruiseToHome, ...) is now one
@@ -93,6 +94,8 @@ enum PhaseId
     Undock,        // released the current connector, backing off to the inner stand-off
     DepartStaging, // flown out to the departure staging fix; rotates to the route heading there
     Cruise,        // controller flying the (possibly reversed) recorded path
+    Climb,         // cruise-family: ascending out of a gravity well (own speed governor + "Climbing" status)
+    Descent,       // cruise-family: descending into a gravity well (own speed governor + "Descending" status)
     Holding,       // station-keeping at the arrival holding fix; reorients to the dock attitude
     Taxi,          // the cleared final move: from the holding fix down the connector axis
     Approach,      // legacy alias for Holding (kept so an in-flight ship resumes across the swap)
@@ -100,8 +103,9 @@ enum PhaseId
     Faulted        // something went wrong; needs operator attention
     // The anti-dive guarantee (roadmap Slice b): every dock is bracketed by a staging
     // fix on departure (DepartStaging) and a holding fix on arrival (Holding); Taxi is
-    // the ONLY phase that moves the ship onto the connector. Reserved for later slices:
-    // Climb, Descent. Adding phases here does NOT double the enum - direction is Leg.
+    // the ONLY phase that moves the ship onto the connector. Climb/Descent (Slice c) are
+    // the same cruise flight law under a different speed governor, selected per Scenario.
+    // Adding phases here does NOT double the enum - direction is Leg.
 }
 
 // The current traversal context: which way we're flying and (by extension) which
@@ -111,6 +115,18 @@ enum PhaseId
 struct Leg
 {
     public bool Outbound;
+}
+
+// The third axis (roadmap.md: phase / leg / scenario). Classified once per leg from the
+// two docks' recorded natural-gravity magnitudes; picks which cruise-family phases run and
+// in what order. Direction is folded in by ClassifyLeg (it passes from/to gravity in leg
+// order), so an outbound Ascent is automatically an inbound Descent - no swap table.
+enum Scenario
+{
+    PlanetLocal,   // both docks in gravity: Climb -> Cruise -> Descent
+    Ascent,        // gravity -> space:      Climb -> Cruise
+    Descent,       // space -> gravity:      Cruise -> Descent
+    SpaceLocal     // both docks in space:   Cruise (identical to pre-0.7 behavior)
 }
 
 // ============================================================================
@@ -185,6 +201,28 @@ class CruisePhase : FlightPhase
     public override void Tick(Program p) { p.TickCruise(); }
 }
 
+// Climb / Descent are the SAME cruise flight law (RunCruiseControl over the same legWps)
+// under a different top-speed governor (CruiseCap) and status label. Selected per Scenario
+// and advanced by the gravity/distance boundary inside RunCruiseFamily; they exist so the
+// operator sees the flight stage and can cap climb/descent speed independently of cruise.
+class ClimbPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Climb; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Climbing"; } }
+    public override void Enter(Program p) { p.boundaryFor = 0; }
+    public override void Tick(Program p) { p.TickClimb(); }
+}
+
+class DescentPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Descent; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Descending"; } }
+    public override void Enter(Program p) { p.boundaryFor = 0; }
+    public override void Tick(Program p) { p.TickDescent(); }
+}
+
 class HoldingPhase : FlightPhase
 {
     public override PhaseId Id { get { return PhaseId.Holding; } }
@@ -247,6 +285,8 @@ string loadTag = "[SF:LOAD]";
 string unloadTag = "[SF:UNLOAD]";
 string lcdTag = "[SF]";
 float cruiseSpeed = 100f;
+float climbSpeed = 100f;          // [m/s] top-speed cap while Climbing; clamped to (5, cruiseSpeed]. Default = cruiseSpeed (no-op) - lower it for a gentler climb.
+float descentSpeed = 100f;        // [m/s] top-speed cap while Descending; clamped to (5, cruiseSpeed]. Default = cruiseSpeed (no-op) - lower it for a gentler descent into a planet.
 float dockSpeed = 5f;
 double maxMassKg = 0;
 double departFill = 95;
@@ -285,6 +325,9 @@ List<string> routeNames = new List<string>();  // saved route names (cache; rebu
 // ---- Runtime state ---------------------------------------------------------
 PhaseId phase = PhaseId.Idle;    // current flight phase (direction-free; see enum PhaseId)
 Leg leg;                         // current traversal context (Outbound = home->dest)
+Scenario legScenario = Scenario.SpaceLocal;  // classified once per leg in ArmCruise; picks the cruise-family plan
+Vector3D legStartPos;            // ship position when the current leg armed; PlanetLocal Climb->Cruise distance gate origin
+public double boundaryFor = 0;   // s the current cruise-family gravity boundary has held (debounce accumulator; reset on phase Enter)
 Dictionary<PhaseId, FlightPhase> phases;   // one instance per phase, built in Program()
 bool operating = false;          // set by START, cleared by STOP / OneTrip end
 string statusMsg = "Idle";
@@ -393,6 +436,19 @@ const double COAST_TOL = 0.5;             // m/s velocity error below which the 
 const double CRUISE_COAST_BAND = 5.0;     // m/s along-track overshoot tolerated without reverse-thrust (kills speed-cap pulsing)
 const double VEL_DEADBAND = 0.4;          // m/s: velocity-tracking error below this is not corrected (hover kept) - kills the vertical/cross-track thrust chatter, worst in low gravity
 
+// ---- Scenario / cruise-family boundary tuning (Slice c) --------------------
+// The gravity magnitude that separates "in a planet's gravity well" from "space".
+// Reused for BOTH scenario classification and the Ascent/Descent phase boundary; it
+// is exactly where RunCruiseControl's space-coast law engages (grav.LengthSquared() < 1e-3),
+// so Climb->Cruise lands precisely where coasting becomes available.
+const double GRAV_EPS = 1e-3;             // m/s^2: below this natural-gravity magnitude counts as space
+const double BOUNDARY_CONFIRM_SEC = 2.0;  // s the gravity boundary must hold before advancing (debounces sensor noise; the signal is monotonic across the boundary so no hysteresis band is needed)
+// PlanetLocal (grav<->grav same-planet) hops never cross GRAV_EPS - natural gravity barely
+// changes across the altitudes a shuttle flies - so their Climb->Cruise->Descent boundaries use
+// monotonic distance gates instead. Coarse Slice-c proxies; Slice d replaces both with altitude bands.
+const double PLANET_CLIMB_DIST = 500;     // m from the leg start before a PlanetLocal Climb hands to Cruise
+const double PLANET_DESCENT_DIST = 500;   // m remaining to the holding fix at which a PlanetLocal Cruise hands to Descent
+
 // ---- Dock-clearance (anti-collision) tuning --------------------------------
 const double CLEAR_CONE_DOT = 0.70;       // cos(~45 deg): a camera must face this close to the dock direction for its raycast to be trusted (an out-of-cone ray silently reads empty, i.e. falsely "clear")
 const double CLEAR_CONFIRM_SEC = 1.5;     // s the corridor must read clear before a held approach resumes - debounces a ship briefly crossing the corridor so we don't lurch into its path
@@ -414,6 +470,8 @@ Program()
         { PhaseId.Undock,        new UndockPhase() },
         { PhaseId.DepartStaging, new DepartStagingPhase() },
         { PhaseId.Cruise,        new CruisePhase() },
+        { PhaseId.Climb,         new ClimbPhase() },
+        { PhaseId.Descent,       new DescentPhase() },
         { PhaseId.Holding,       new HoldingPhase() },
         { PhaseId.Taxi,          new TaxiPhase() },
         { PhaseId.Approach,      new ApproachPhase() },
@@ -537,6 +595,8 @@ string LegacyStateName()
         case PhaseId.Undock:        return leg.Outbound ? "UndockHome"   : "UndockDest";
         case PhaseId.DepartStaging: return leg.Outbound ? "UndockHome"   : "UndockDest";
         case PhaseId.Cruise:        return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
+        case PhaseId.Climb:         return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
+        case PhaseId.Descent:       return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
         case PhaseId.Holding:       return leg.Outbound ? "ApproachDest" : "ApproachHome";
         case PhaseId.Taxi:          return leg.Outbound ? "ApproachDest" : "ApproachHome";
         case PhaseId.Approach:      return leg.Outbound ? "ApproachDest" : "ApproachHome";
@@ -780,7 +840,9 @@ DockPose CapturePose(IMyShipConnector c)
         // grid is the static dock. Stored so the approach raycast can tell "the base
         // itself" from "someone else's ship parked on my connector".
         BaseGridId = (c.Status == MyShipConnectorStatus.Connected && c.OtherConnector != null)
-                     ? c.OtherConnector.CubeGrid.EntityId : 0
+                     ? c.OtherConnector.CubeGrid.EntityId : 0,
+        // Natural-gravity magnitude at the dock, for leg-scenario classification (Slice c).
+        Grav = rc.GetNaturalGravity().Length()
     };
 }
 
@@ -1077,7 +1139,7 @@ void TickDepartStaging()
         ReleaseControl();
         phaseTimer = 0;
         stagingAtFix = false;
-        SwitchPhase(PhaseId.Cruise);
+        SwitchPhase(FirstCruisePhase());   // Climb / Cruise per the leg's Scenario
     }
 }
 
@@ -1090,14 +1152,21 @@ Vector3D FirstCruiseTarget(bool toDest)
     return legWps[0];
 }
 
-void TickCruise()
+// Cruise-family entry points. Cruise/Climb/Descent all run the SAME leg via the shared
+// core below; the phase only selects the speed governor (CruiseCap) and status label, and
+// which boundary advances to the next cruise-family phase.
+void TickCruise()   { RunCruiseFamily(); }
+void TickClimb()    { RunCruiseFamily(); }
+void TickDescent()  { RunCruiseFamily(); }
+
+void RunCruiseFamily()
 {
     bool toDest = leg.Outbound;
     if (!CruiseArmed(toDest)) { ArmCruise(toDest); return; }
 
     cruiseProgTimer += dt;
     bool done = RunCruiseControl();
-    statusMsg = toDest ? "Cruising to destination" : "Cruising home";
+    statusMsg = CruiseStatus();
 
     if (done)
     {
@@ -1114,7 +1183,103 @@ void TickCruise()
         ReleaseControl();
         SwitchPhase(PhaseId.Faulted);
         statusMsg = "Cruise stuck - check thrust/gyro/geometry";
+        return;
     }
+    // Still en route: advance Climb->Cruise->Descent when this leg's boundary is crossed.
+    // Mid-leg only - NO ReleaseControl and NO cruiseArmed clear; cruiseIdx must survive.
+    if (BoundaryReady()) SwitchPhase(NextCruisePhase());
+}
+
+// Per-phase governor cap fed to RunCruiseControl. Keyed off `phase` (not a stored field)
+// so it stays correct after a mid-flight recompile - LoadState assigns `phase` directly and
+// never calls Enter. Caps are clamped <= cruiseSpeed at load, so the profile (built at the
+// cruiseSpeed ceiling) always has enough braking margin - no profile rebuild on transition.
+double CruiseCap()
+{
+    if (phase == PhaseId.Climb) return climbSpeed;
+    if (phase == PhaseId.Descent) return descentSpeed;
+    return cruiseSpeed;
+}
+
+// True in any cruise-family phase (Cruise/Climb/Descent) - they share the leg, so ETA,
+// remaining-distance and the IGC report apply to all three.
+bool InCruiseFamily()
+{
+    return phase == PhaseId.Cruise || phase == PhaseId.Climb || phase == PhaseId.Descent;
+}
+
+string CruiseStatus()
+{
+    bool toDest = leg.Outbound;
+    string verb = phase == PhaseId.Climb ? "Climbing"
+                : phase == PhaseId.Descent ? "Descending" : "Cruising";
+    return verb + (toDest ? " to destination" : " home");
+}
+
+// Scenario from the two ends' recorded gravity. > GRAV_EPS = in a gravity well.
+Scenario Classify(double fromG, double toG)
+{
+    bool f = fromG > GRAV_EPS, t = toG > GRAV_EPS;
+    if (f && t) return Scenario.PlanetLocal;
+    if (f && !t) return Scenario.Ascent;
+    if (!f && t) return Scenario.Descent;
+    return Scenario.SpaceLocal;
+}
+// Classify in leg order (from -> to), so an outbound Ascent is an inbound Descent for free.
+Scenario ClassifyLeg()
+{
+    double fromG = leg.Outbound ? homePose.Grav : destPose.Grav;
+    double toG   = leg.Outbound ? destPose.Grav : homePose.Grav;
+    return Classify(fromG, toG);
+}
+
+// The cruise-family phase to enter from DepartStaging: Climb if the leg departs a gravity
+// well (Ascent/PlanetLocal), else straight to Cruise. Sets legScenario so the plan is known
+// before ArmCruise runs on the first cruise tick (ArmCruise re-classifies; idempotent).
+PhaseId FirstCruisePhase()
+{
+    legScenario = ClassifyLeg();
+    return (legScenario == Scenario.PlanetLocal || legScenario == Scenario.Ascent)
+           ? PhaseId.Climb : PhaseId.Cruise;
+}
+
+// Successor in the Climb -> Cruise -> Descent chain. BoundaryReady gates whether the
+// advance actually fires, so a terminal phase never reaches here with a real trigger.
+PhaseId NextCruisePhase()
+{
+    if (phase == PhaseId.Climb) return PhaseId.Cruise;
+    if (phase == PhaseId.Cruise) return PhaseId.Descent;
+    return phase;
+}
+
+// Is the current cruise-family phase's advance trigger satisfied? Gravity crossings
+// (Ascent/Descent) use a confirm dwell; PlanetLocal uses monotonic distance gates because
+// natural gravity doesn't cross GRAV_EPS within a single planet. Slice d replaces the
+// distance gates with altitude bands.
+bool BoundaryReady()
+{
+    if (rc == null) return false;
+    double gMag = rc.GetNaturalGravity().Length();
+
+    if (phase == PhaseId.Climb)   // -> Cruise (Ascent, PlanetLocal)
+    {
+        if (legScenario == Scenario.PlanetLocal)
+            return Vector3D.Distance(rc.GetPosition(), legStartPos) > PLANET_CLIMB_DIST;
+        boundaryFor = gMag < GRAV_EPS ? boundaryFor + dt : 0;   // Ascent: left the well
+        return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+    }
+    if (phase == PhaseId.Cruise)  // -> Descent (Descent, PlanetLocal only)
+    {
+        if (legScenario == Scenario.PlanetLocal)
+            return RemainingDistance() < PLANET_DESCENT_DIST;
+        if (legScenario == Scenario.Descent)
+        {
+            boundaryFor = gMag > GRAV_EPS ? boundaryFor + dt : 0;   // entered the well
+            return boundaryFor >= BOUNDARY_CONFIRM_SEC;
+        }
+        return false;   // Ascent / SpaceLocal: Cruise is terminal
+    }
+    return false;       // Descent is terminal
 }
 
 bool cruiseArmedToDest = false;
@@ -1146,6 +1311,9 @@ void ArmCruise(bool toDest)
         return;
     }
     BuildVelocityProfile();
+    legScenario = ClassifyLeg();          // pick the cruise-family plan for this leg/direction
+    legStartPos = rc.GetPosition();       // origin for the PlanetLocal Climb->Cruise distance gate
+    boundaryFor = 0;
     cruiseIdx = 0;
     cruiseProgTimer = 0;
     cruiseBestDist = double.MaxValue;
@@ -1297,10 +1465,12 @@ bool RunCruiseControl()
         }
     }
 
-    // Braking curve toward this waypoint's profiled speed, capped at cruise.
+    // Braking curve toward this waypoint's profiled speed, capped at the active governor
+    // (Cruise/Climb/Descent). CruiseCap() is always <= cruiseSpeed, so the profile's
+    // braking margin (built at the cruiseSpeed ceiling) stays valid.
     double vmax = legVmax[cruiseIdx];
     double vBrake = Math.Sqrt(vmax * vmax + 2.0 * cruiseAccel * dist);
-    double speed = Math.Min(cruiseSpeed, vBrake);
+    double speed = Math.Min(CruiseCap(), vBrake);
 
     // Attitude target. fwdTarget is what the *nose* aims at (and what the heading throttle
     // is measured against); upTarget is where the top of the ship points. In space we just
@@ -2569,7 +2739,7 @@ string BuildHeader()
     sb.Append(haveRoute
         ? ("Route " + (activeRoute != "" ? activeRoute + " " : "") + path.Count + "wp")
         : "Route: none").Append('\n');
-    if (phase == PhaseId.Cruise)
+    if (InCruiseFamily())
         sb.Append("ETA ").Append(FormatEta()).Append(' ')
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg).Append('\n');
@@ -2612,7 +2782,7 @@ string BuildTrip()
         ? ("Route " + (activeRoute != "" ? activeRoute + " " : "") + path.Count + "wp")
         : "Route: none").Append('\n');
     sb.Append("Phase: ").Append(ShipState()).Append('\n');
-    if (phase == PhaseId.Cruise)
+    if (InCruiseFamily())
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg);
@@ -2641,9 +2811,10 @@ string BuildTelem()
       .Append("  t=").Append(phaseTimer.ToString("0.0")).Append("s\n");
 
     // Speed vs the governor's cap at the current waypoint (cap shown only while cruising).
+    // The cap is the lower of the waypoint profile and the active Cruise/Climb/Descent governor.
     sb.Append("Spd ").Append(spd.ToString("0.0")).Append("m/s");
     if (cruiseArmed && cruiseIdx < legVmax.Count)
-        sb.Append(" /").Append(legVmax[cruiseIdx].ToString("0")).Append("cap");
+        sb.Append(" /").Append(Math.Min(CruiseCap(), legVmax[cruiseIdx]).ToString("0")).Append("cap");
     sb.Append('\n');
 
     // Vertical rate along gravity-up (climb +, descent -); blank in space.
@@ -2689,7 +2860,8 @@ string BuildTelem()
 string ShipState()
 {
     string lbl = phases[phase].Label;
-    if (phase == PhaseId.DepartStaging || phase == PhaseId.Cruise || phase == PhaseId.Holding
+    if (phase == PhaseId.DepartStaging || phase == PhaseId.Cruise || phase == PhaseId.Climb
+        || phase == PhaseId.Descent || phase == PhaseId.Holding
         || phase == PhaseId.Taxi || phase == PhaseId.Approach)
         return lbl + (leg.Outbound ? " >" : " <");
     return lbl;
@@ -2759,7 +2931,7 @@ void Broadcast()
 {
     // Pipe-delimited: name|state|etaSec|distM|fill|massT|running
     double distM = 0; int etaSec = -1;
-    if (phase == PhaseId.Cruise)
+    if (InCruiseFamily())
     {
         distM = RemainingDistance();
         double spd = rc.GetShipSpeed();
@@ -2920,6 +3092,8 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("sf", "unloadTag", unloadTag);
     ini.Set("sf", "lcdTag", lcdTag);
     ini.Set("sf", "cruiseSpeed", cruiseSpeed);
+    ini.Set("sf", "climbSpeed", climbSpeed);
+    ini.Set("sf", "descentSpeed", descentSpeed);
     ini.Set("sf", "dockSpeed", dockSpeed);
     ini.Set("sf", "maxMassKg", maxMassKg);
     ini.Set("sf", "departFill", departFill);
@@ -2970,6 +3144,10 @@ void LoadConfig()
     unloadTag = ini.Get("sf", "unloadTag").ToString(ini.Get("sf", "unloadSorter").ToString(unloadTag));
     lcdTag = ini.Get("sf", "lcdTag").ToString(lcdTag);
     cruiseSpeed = (float)ini.Get("sf", "cruiseSpeed").ToDouble(cruiseSpeed);
+    // Climb/Descent governors: clamped to (5, cruiseSpeed] so a lower cap is always braking-safe
+    // against the velocity profile (built at the cruiseSpeed ceiling). Default = cruiseSpeed (no-op).
+    climbSpeed = (float)Clamp(ini.Get("sf", "climbSpeed").ToDouble(cruiseSpeed), 5, cruiseSpeed);
+    descentSpeed = (float)Clamp(ini.Get("sf", "descentSpeed").ToDouble(cruiseSpeed), 5, cruiseSpeed);
     dockSpeed = (float)ini.Get("sf", "dockSpeed").ToDouble(dockSpeed);
     maxMassKg = ini.Get("sf", "maxMassKg").ToDouble(maxMassKg);
     departFill = ini.Get("sf", "departFill").ToDouble(departFill);
@@ -3055,6 +3233,9 @@ void WriteRoute(MyIni ini, string name)
     // Per-dock staging/holding-fix distance override (0 = use the global holdDist).
     ini.Set(s, "homeHoldDist", homePose.HoldDist);
     ini.Set(s, "destHoldDist", destPose.HoldDist);
+    // Natural-gravity magnitude at each dock, for leg-scenario classification (0 = space).
+    ini.Set(s, "homeG", homePose.Grav);
+    ini.Set(s, "destG", destPose.Grav);
     var sb = new StringBuilder();
     for (int i = 0; i < path.Count; i++) { if (i > 0) sb.Append(';'); sb.Append(Vec(path[i])); }
     ini.Set(s, "path", sb.ToString());
@@ -3104,7 +3285,7 @@ void MigrateLegacyRoute(MyIni ini)
     {
         string[] keys = { "homeConn", "destConn", "homePos", "homeFwd", "homeUp", "homeConnFwd",
                           "destPos", "destFwd", "destUp", "destConnFwd", "homeBaseId", "destBaseId",
-                          "homeHoldDist", "destHoldDist", "path", "homeDock", "destDock" };
+                          "homeHoldDist", "destHoldDist", "homeG", "destG", "path", "homeDock", "destDock" };
         string dst = RouteSec("Main");
         foreach (var key in keys)
         {
@@ -3145,6 +3326,11 @@ void LoadRouteInto(MyIni ini, string name)
     // Per-dock staging/holding-fix override; absent (0) on pre-0.5 routes -> global holdDist.
     homePose.HoldDist = ini.Get(s, "homeHoldDist").ToDouble(0);
     destPose.HoldDist = ini.Get(s, "destHoldDist").ToDouble(0);
+
+    // Natural-gravity magnitude at each dock; absent (0) on pre-0.7 routes -> classified as
+    // space, so an un-re-recorded route stays SpaceLocal (today's single-Cruise behavior).
+    homePose.Grav = ini.Get(s, "homeG").ToDouble(0);
+    destPose.Grav = ini.Get(s, "destG").ToDouble(0);
 
     path.Clear();
     var raw = ini.Get(s, "path").ToString("");

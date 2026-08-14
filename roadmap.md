@@ -7,8 +7,13 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.6.0 (Slice b delivered + DepartStaging staging-turn fix, then the `SF` tag/config
-  rename — `DepartStaging`/`Holding`/`Taxi` phases with derived
+- **Version:** 0.7.0 (Slice c delivered — scenario-aware cruise: each leg classifies from its two
+  docks' recorded gravity into PlanetLocal / Ascent / Descent / SpaceLocal, and the single cruise
+  splits into `Climb → Cruise → Descent` stages as the scenario demands. The stages reuse the exact
+  cruise flight law with optional per-stage speed governors (`climbSpeed`/`descentSpeed`,
+  default = `cruiseSpeed`, so a no-op until lowered) and distinct operator labels. Precise
+  altitude-based boundaries stay in Slice d; this slice uses a coarse gravity/distance proxy. Built
+  on Slice b's `DepartStaging`/`Holding`/`Taxi` phases with derived
   outer stand-off fixes and the local clearance gate. The ship assembles at a staging fix before
   flying and holds at an arrival fix before docking; only the clearance-gated `Taxi` phase ever
   touches a connector. Reorientation to the dock attitude is gravity-gated. Plus Slice a's
@@ -237,6 +242,9 @@ After Slice b (v0.5.0, staging/holding/taxi): stripped **87,841 chars**, **12,15
 After the v0.6.0 `SF` rename: stripped **89,034 chars**, **10,966** headroom (+199 vs
 0.5.0; the `stagingAtFix` latch, coast-hold staging turn, and `StationKeep` helper, less the
 duplicate-ETA removal).
+After Slice c (v0.7.0, scenario + Climb/Descent): stripped **93,437 chars**, **6,563** headroom
+(+4,403 vs 0.6.0; the two phase classes, scenario classification, boundary logic, and the
+gravity-capture persistence).
 
 ---
 
@@ -281,11 +289,34 @@ connector.
       Skippy-Shuttle base board. Rebuild + budget check: **87,841 chars (12,159 headroom)**, braces
       balanced (448/448).
 
-### Slice c — flight plan + scenario
+### Slice c — flight plan + scenario — delivered, 0.7.0
 
 Capture `homeG`/`destG` at record; add `Classify`; lift the phase sequence into a data-driven
-`PhaseId[]` plan per scenario; add `Climb`/`Descent` phases (governor + status, reusing
-`RunCruiseControl`).
+plan per scenario; add `Climb`/`Descent` phases (governor + status, reusing `RunCruiseControl`).
+
+- [x] `struct DockPose` carries `Grav` (natural-gravity magnitude captured at `CapturePose`);
+      persisted per `[route.<name>]` as `homeG`/`destG` and added to the legacy-route migration key
+      list. Pre-0.7 routes read 0 → classify SpaceLocal → fly `Cruise` only (no regression).
+- [x] `Scenario { PlanetLocal, Ascent, Descent, SpaceLocal }` + `Classify(fromG, toG)` and
+      `ClassifyLeg()` reading the leg's own from→to gravity (so an outbound Ascent is an inbound
+      Descent with no direction bookkeeping). `FirstCruisePhase()`/`NextCruisePhase()` encode the
+      per-scenario plan; `DepartStaging` hands off to the scenario's first cruise-family phase.
+- [x] `Climb`/`Descent` phases (`IsFlightControl`, labels `Climbing`/`Descending`) reuse
+      `RunCruiseControl` over the same recorded path. Speed governor is derived live from `phase`
+      via `CruiseCap()` (not a cached field — survives the `Enter`-less resume path); the profile is
+      still built at the `cruiseSpeed` ceiling, so a lowered cap is always braking-safe with no
+      rebuild. `climbSpeed`/`descentSpeed` config in `[sf]`, clamped `(5, cruiseSpeed]`, both
+      default to `cruiseSpeed` (governor is a no-op out of the box). File-only; not in the LCD menu.
+- [x] Stage boundaries via `BoundaryReady()`: gravity crossing `GRAV_EPS` held `BOUNDARY_CONFIRM_SEC`
+      for Ascent/Descent; monotonic distance gates (`PLANET_CLIMB_DIST`/`PLANET_DESCENT_DIST`) for
+      PlanetLocal (SE gravity barely varies within a planet, so a gravity trigger would dead-end).
+      Coarse Slice-c proxies — Slice d replaces both with altitude bands. Intermediate advances
+      preserve `cruiseIdx`/`cruiseArmed` (no `ReleaseControl`); only done/stuck release.
+- [x] IGC wire unchanged: `Climb`/`Descent` report as `CruiseToDest`/`CruiseToHome` via
+      `LegacyStateName`, so a Skippy-Shuttle base board decodes them as cruising. Manual/recovery
+      entries still start in `Cruise` (a ship recovered mid-descent must not restart in Climb).
+- [x] Rebuild + budget check: **93,437 chars (6,563 headroom, +4,403 vs 0.6.0)**, braces balanced
+      (488/488). Version → 0.7.0.
 
 ### Slice d — environment sensing
 
