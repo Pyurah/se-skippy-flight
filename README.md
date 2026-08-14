@@ -117,15 +117,17 @@ sampling) or `simplifyMeters` (more aggressive straightening) and re-record. Set
 
 | Command | Effect |
 |---|---|
-| `RECORD HOME` | Bind the docked connector as home; start recording the path |
+| `RECORD HOME [name]` | Bind the docked connector as home; start recording the path. `name` (optional) saves it as a named route — omit to re-record the active route (or `Main`) |
 | `RECORD DEST` | Bind the docked connector as destination; finish + save the route |
+| `ROUTE [name]` | Switch the active route to a saved one (blocked while operating). No name = report the active route + saved count |
+| `DELROUTE <name>` | Delete a saved route; if it was active, fall back to another (or none) |
 | `START` / `GO` | Begin operating per the run mode |
 | `STOP` | Abort the flight, turn sorters off, return to Idle |
 | `HOME` | Fly back to the home connector and dock |
 | `DEPART` | Release the shuttle from the dock it's holding at **now** (overrides its trigger) |
 | `MODE CONTINUOUS\|ONETRIP\|ONEWAY` | Change the run mode live (`WAITFULL` still accepted — maps to Continuous + `homeTrigger=Cargo`) |
 | `RESUME` | Continue the saved state after a recompile |
-| `CLEARROUTE` | Erase the recorded route |
+| `CLEARROUTE` | Delete the **active** route (falls back to another saved route, or none) |
 | `UP` / `DOWN` | Move the LCD menu cursor (or change a value while editing) |
 | `APPLY` | Select the highlighted item / save the value being edited |
 | `BACK` | Leave a submenu / cancel an edit |
@@ -139,7 +141,11 @@ show a status header with a `>` cursor menu beneath it:
 
 - **Main:** Start/Stop, Run Mode (APPLY cycles it), **Depart Now**, Go Home, and entries into
   the submenus. *Depart Now* releases the shuttle from the dock it's holding at right now.
-- **Record:** Record Home connector, Record Dest connector, Clear Route.
+- **Record:** Record Home connector, Record Dest connector, Clear Route, and a **Routes >>**
+  entry. The **Routes** page lists every saved route (the active one marked `*`); `APPLY` loads the
+  highlighted route (blocked while operating — `STOP` first). To *create* a named route, type
+  `RECORD HOME <name>` as a run-argument (the menu is button-only, so it can't take a name); the
+  menu's *Record Home* re-records whichever route is currently active.
 - **Settings:** Cruise Speed, Dock Speed, Max Mass (tonnes), Depart Fill %, and a **Depart >>**
   entry into the departure page — `APPLY` to edit, `UP`/`DOWN` to change, `APPLY` to save, `BACK`
   to cancel. Every saved value is written back to Custom Data, so it survives recompiles.

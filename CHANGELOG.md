@@ -4,6 +4,36 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-14
+
+### Added
+- **Multiple named routes.** Routes are no longer limited to one — each is stored in its own
+  `[route.<name>]` section of the PB's Custom Data, and a `[routes] active=<name>` pointer tracks
+  the one currently loaded. Record a named route with `RECORD HOME <name>` (the name carries
+  through to `RECORD DEST`); the name is optional and defaults to the active route, or `Main`.
+- **Routes menu page.** A new **Routes** page (Record ▸ Routes) lists every saved route with the
+  active one marked `*`; APPLY loads the highlighted route. Switching is blocked while operating
+  (a live leg would otherwise have its target swapped mid-flight — STOP first).
+- **`ROUTE <name>`** command — switch the active route from a cockpit toolbar button / PB argument
+  without opening the menu. `ROUTE` with no name reports the active route and saved count.
+- **`DELROUTE <name>`** command — delete a saved route; if it was active, the ship falls back to
+  another saved route (or none). The menu's **Clear Route** now deletes the active route the same
+  way (previously it wiped the single route).
+- Route name shown in the status header and Trip view (`Route <name> <n>wp`).
+
+### Changed
+- Route persistence moved from the single `[route]` section to per-route `[route.<name>]` sections.
+  Route names are sanitised to `[A-Za-z0-9_-]`, max 16 chars, so they are safe as section suffixes.
+
+### Migration
+- An existing single `[route]` section is copied once to `[route.Main]` on first load and then
+  removed, so a ship already carrying a route keeps it (as "Main") with no re-recording. If named
+  routes already exist, a stale `[route]` is simply dropped.
+
+### Notes
+- Stripped deploy size: 81,378 chars (18,622 under the 100,000 PB limit; +5,585 vs 0.2.2). Braces
+  balanced (404/404). Version constant bumped to 0.3.0.
+
 ## [0.2.2] - 2026-08-14
 
 ### Fixed

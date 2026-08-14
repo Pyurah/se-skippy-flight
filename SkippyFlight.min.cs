@@ -1,4 +1,4 @@
-const string VERSION = "0.2.2";
+const string VERSION = "0.3.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -128,6 +128,9 @@ DockPose homePose, destPose;
 string homeConn = "", destConn = "";
 List<Vector3D> path = new List<Vector3D>();
 bool haveRoute = false;
+string activeRoute = "";
+string recordName = "";
+List<string> routeNames = new List<string>();
 PhaseId phase = PhaseId.Idle;
 Leg leg;
 Dictionary<PhaseId, FlightPhase> phases;
@@ -150,7 +153,7 @@ bool gyroResting = false;
 double dockBlockTimer = 0;
 double dockClearFor = 0;
 const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip";
-const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3;
+const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
 int menuPage = PAGE_MAIN;
 int menuIndex = 0;
 bool editing = false;
@@ -318,14 +321,15 @@ void ApplyLegacyState(string name)
 }
 void HandleCommand(string arg)
 {
+    var raw = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
     var parts = arg.ToUpperInvariant().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
     if (parts.Length == 0) return;
     switch (parts[0])
     {
         case "RECORD":
-            if (parts.Length > 1 && parts[1] == "HOME") RecordHome();
-            else if (parts.Length > 1 && parts[1] == "DEST") RecordDest();
-            else statusMsg = "Usage: RECORD HOME | RECORD DEST";
+            if (parts.Length > 1 && parts[1] == "HOME") RecordHome(parts.Length > 2 ? raw[2] : "");
+            else if (parts.Length > 1 && parts[1] == "DEST") RecordDest(parts.Length > 2 ? raw[2] : "");
+            else statusMsg = "Usage: RECORD HOME [name] | RECORD DEST";
             break;
         case "START":
         case "GO":
@@ -401,6 +405,19 @@ void HandleCommand(string arg)
             ClearRoute();
             statusMsg = "Route cleared";
             break;
+        case "ROUTE":
+            if (parts.Length > 1)
+            {
+                if (operating) statusMsg = "STOP before switching routes";
+                else SwitchActiveRoute(raw[1]);
+            }
+            else statusMsg = "Active: " + (activeRoute == "" ? "none" : activeRoute)
+                             + " (" + routeNames.Count + " saved)";
+            break;
+        case "DELROUTE":
+            if (parts.Length > 1) DeleteRoute(raw[1]);
+            else statusMsg = "Usage: DELROUTE <name>";
+            break;
         case "UP":    MenuMove(-1); break;
         case "DOWN":  MenuMove(+1); break;
         case "APPLY": MenuApply();  break;
@@ -431,10 +448,12 @@ void SetMode(string m)
     Me.CustomData = ini.ToString();
     statusMsg = "Mode = " + runMode;
 }
-void RecordHome()
+void RecordHome(string name = "")
 {
     var c = ConnectedConnector();
     if (c == null) { statusMsg = "RECORD HOME: dock at the home connector first"; return; }
+    string n = SanitizeName(name);
+    recordName = n != "" ? n : (activeRoute != "" ? activeRoute : "Main");
     homePose = CapturePose(c);
     homeConn = c.CustomName;
     path.Clear();
@@ -442,21 +461,24 @@ void RecordHome()
     lastDir = Vector3D.Zero;
     SwitchPhase(PhaseId.Recording);
     operating = false;
-    statusMsg = "Recording from HOME (" + homeConn + "). Fly to destination.";
+    statusMsg = "Recording '" + recordName + "' from " + homeConn + ". Fly to destination.";
 }
-void RecordDest()
+void RecordDest(string name = "")
 {
     if (phase != PhaseId.Recording) { statusMsg = "RECORD DEST: run RECORD HOME first"; return; }
     var c = ConnectedConnector();
     if (c == null) { statusMsg = "RECORD DEST: dock at the destination connector first"; return; }
+    string n = SanitizeName(name);
+    if (n != "") recordName = n;
     destPose = CapturePose(c);
     destConn = c.CustomName;
     if (path.Count == 0 || Vector3D.Distance(path[path.Count - 1], destPose.Pos) > 5)
         AddCrumb(rc.GetPosition());
     haveRoute = true;
+    activeRoute = recordName != "" ? recordName : "Main";
     SwitchPhase(PhaseId.Idle);
     SaveRoute();
-    statusMsg = "Route saved: " + homeConn + " -> " + destConn + " (" + path.Count + " waypoints)";
+    statusMsg = "Saved '" + activeRoute + "': " + homeConn + " -> " + destConn + " (" + path.Count + "wp)";
 }
 DockPose CapturePose(IMyShipConnector c)
 {
@@ -1373,9 +1395,10 @@ int MenuCount()
     switch (menuPage)
     {
         case PAGE_MAIN:     return 6;
-        case PAGE_RECORD:   return 4;
+        case PAGE_RECORD:   return 5;
         case PAGE_SETTINGS: return 6;
         case PAGE_DEPART:   return 7;
+        case PAGE_ROUTES:   return routeNames.Count + 1;
         default:            return 1;
     }
 }
@@ -1407,8 +1430,18 @@ void MenuApply()
             case 0: RecordHome(); break;
             case 1: RecordDest(); break;
             case 2: ClearRoute(); statusMsg = "Route cleared"; break;
-            case 3: menuPage = PAGE_MAIN; menuIndex = 4; break;
+            case 3: menuPage = PAGE_ROUTES; menuIndex = 0; break;
+            case 4: menuPage = PAGE_MAIN; menuIndex = 4; break;
         }
+    }
+    else if (menuPage == PAGE_ROUTES)
+    {
+        if (menuIndex < routeNames.Count)
+        {
+            if (operating) statusMsg = "STOP before switching routes";
+            else SwitchActiveRoute(routeNames[menuIndex]);
+        }
+        else { menuPage = PAGE_RECORD; menuIndex = 3; }
     }
     else if (menuPage == PAGE_SETTINGS)
     {
@@ -1440,6 +1473,7 @@ void MenuBack()
 {
     if (editing) { editing = false; statusMsg = "Edit cancelled"; return; }
     if (menuPage == PAGE_DEPART) { menuPage = PAGE_SETTINGS; menuIndex = 4; }
+    else if (menuPage == PAGE_ROUTES) { menuPage = PAGE_RECORD; menuIndex = 3; }
     else if (menuPage != PAGE_MAIN) { menuPage = PAGE_MAIN; menuIndex = 0; }
 }
 void CycleMode()
@@ -1523,6 +1557,13 @@ List<string> MenuLabels()
         l.Add("Record Home");
         l.Add("Record Dest");
         l.Add("Clear Route");
+        l.Add("Routes >>");
+        l.Add("<< Back");
+    }
+    else if (menuPage == PAGE_ROUTES)
+    {
+        for (int i = 0; i < routeNames.Count; i++)
+            l.Add((routeNames[i] == activeRoute ? "* " : "  ") + routeNames[i]);
         l.Add("<< Back");
     }
     else if (menuPage == PAGE_SETTINGS)
@@ -1557,7 +1598,8 @@ string PageName()
 {
     return menuPage == PAGE_RECORD ? "RECORD"
          : menuPage == PAGE_SETTINGS ? "SETTINGS"
-         : menuPage == PAGE_DEPART ? "DEPART" : "MAIN";
+         : menuPage == PAGE_DEPART ? "DEPART"
+         : menuPage == PAGE_ROUTES ? "ROUTES" : "MAIN";
 }
 void RenderShip()
 {
@@ -1595,7 +1637,9 @@ string BuildHeader()
     sb.Append("Cargo ").Append(CargoFillPct().ToString("0")).Append("% ")
       .Append((ShipMassKg() / 1000.0).ToString("0")).Append("t ")
       .Append((rc != null ? rc.GetShipSpeed() : 0).ToString("0")).Append("m/s\n");
-    sb.Append(haveRoute ? ("Route " + path.Count + "wp") : "Route: none").Append('\n');
+    sb.Append(haveRoute
+        ? ("Route " + (activeRoute != "" ? activeRoute + " " : "") + path.Count + "wp")
+        : "Route: none").Append('\n');
     if (phase == PhaseId.Cruise)
         sb.Append("ETA ").Append(FormatEta()).Append(' ')
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
@@ -1628,7 +1672,9 @@ string BuildTrip()
 {
     var sb = new StringBuilder();
     sb.Append("-- Trip --\n");
-    sb.Append(haveRoute ? ("Route " + path.Count + "wp") : "Route: none").Append('\n');
+    sb.Append(haveRoute
+        ? ("Route " + (activeRoute != "" ? activeRoute + " " : "") + path.Count + "wp")
+        : "Route: none").Append('\n');
     sb.Append("Phase: ").Append(ShipState()).Append('\n');
     if (phase == PhaseId.Cruise)
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
@@ -1906,46 +1952,90 @@ DepartTrigger TrigFromString(string s)
         default:       return DepartTrigger.Auto;
     }
 }
+string RouteSec(string name) { return "route." + name; }
 void SaveRoute()
 {
+    if (activeRoute == "") activeRoute = "Main";
     var ini = new MyIni();
     ini.TryParse(Me.CustomData);
-    ini.Set("route", "homeConn", homeConn);
-    ini.Set("route", "destConn", destConn);
-    ini.Set("route", "homePos", Vec(homePose.Pos));
-    ini.Set("route", "homeFwd", Vec(homePose.Fwd));
-    ini.Set("route", "homeUp", Vec(homePose.Up));
-    ini.Set("route", "homeConnFwd", Vec(homePose.ConnFwd));
-    ini.Set("route", "destPos", Vec(destPose.Pos));
-    ini.Set("route", "destFwd", Vec(destPose.Fwd));
-    ini.Set("route", "destUp", Vec(destPose.Up));
-    ini.Set("route", "destConnFwd", Vec(destPose.ConnFwd));
-    ini.Set("route", "homeBaseId", homePose.BaseGridId);
-    ini.Set("route", "destBaseId", destPose.BaseGridId);
+    WriteRoute(ini, activeRoute);
+    ini.Set("routes", "active", activeRoute);
+    Me.CustomData = ini.ToString();
+    RefreshRouteNames();
+}
+void WriteRoute(MyIni ini, string name)
+{
+    string s = RouteSec(name);
+    ini.Set(s, "homeConn", homeConn);
+    ini.Set(s, "destConn", destConn);
+    ini.Set(s, "homePos", Vec(homePose.Pos));
+    ini.Set(s, "homeFwd", Vec(homePose.Fwd));
+    ini.Set(s, "homeUp", Vec(homePose.Up));
+    ini.Set(s, "homeConnFwd", Vec(homePose.ConnFwd));
+    ini.Set(s, "destPos", Vec(destPose.Pos));
+    ini.Set(s, "destFwd", Vec(destPose.Fwd));
+    ini.Set(s, "destUp", Vec(destPose.Up));
+    ini.Set(s, "destConnFwd", Vec(destPose.ConnFwd));
+    ini.Set(s, "homeBaseId", homePose.BaseGridId);
+    ini.Set(s, "destBaseId", destPose.BaseGridId);
     var sb = new StringBuilder();
     for (int i = 0; i < path.Count; i++) { if (i > 0) sb.Append(';'); sb.Append(Vec(path[i])); }
-    ini.Set("route", "path", sb.ToString());
-    Me.CustomData = ini.ToString();
+    ini.Set(s, "path", sb.ToString());
 }
 void LoadRoute()
 {
     var ini = new MyIni();
     if (!ini.TryParse(Me.CustomData)) return;
+    MigrateLegacyRoute(ini);
+    RefreshRouteNames();
+    string active = ini.Get("routes", "active").ToString("");
+    if (active == "" || !routeNames.Contains(active))
+        active = routeNames.Count > 0 ? routeNames[0] : "";
+    if (active == "") { haveRoute = false; activeRoute = ""; return; }
+    activeRoute = active;
+    LoadRouteInto(ini, active);
+}
+void MigrateLegacyRoute(MyIni ini)
+{
     if (!ini.ContainsSection("route")) return;
-    homeConn = ini.Get("route", "homeConn").ToString("");
-    destConn = ini.Get("route", "destConn").ToString("");
-    bool haveHP = LoadPos(ini, "homePos", "homeDock", out homePose.Pos);
-    bool haveDP = LoadPos(ini, "destPos", "destDock", out destPose.Pos);
-    bool haveOri = TryVec(ini.Get("route", "homeFwd").ToString(""), out homePose.Fwd)
-                 & TryVec(ini.Get("route", "homeUp").ToString(""), out homePose.Up)
-                 & TryVec(ini.Get("route", "homeConnFwd").ToString(""), out homePose.ConnFwd)
-                 & TryVec(ini.Get("route", "destFwd").ToString(""), out destPose.Fwd)
-                 & TryVec(ini.Get("route", "destUp").ToString(""), out destPose.Up)
-                 & TryVec(ini.Get("route", "destConnFwd").ToString(""), out destPose.ConnFwd);
-    homePose.BaseGridId = ini.Get("route", "homeBaseId").ToInt64(0);
-    destPose.BaseGridId = ini.Get("route", "destBaseId").ToInt64(0);
+    var secs = new List<string>();
+    ini.GetSections(secs);
+    bool haveNamed = false;
+    foreach (var sec in secs) if (sec.StartsWith("route.")) { haveNamed = true; break; }
+    if (!haveNamed)
+    {
+        string[] keys = { "homeConn", "destConn", "homePos", "homeFwd", "homeUp", "homeConnFwd",
+                          "destPos", "destFwd", "destUp", "destConnFwd", "homeBaseId", "destBaseId",
+                          "path", "homeDock", "destDock" };
+        string dst = RouteSec("Main");
+        foreach (var key in keys)
+        {
+            var v = ini.Get("route", key);
+            if (!v.IsEmpty) ini.Set(dst, key, v.ToString(""));
+        }
+        if (!ini.ContainsKey("routes", "active")) ini.Set("routes", "active", "Main");
+    }
+    ini.DeleteSection("route");
+    Me.CustomData = ini.ToString();
+}
+void LoadRouteInto(MyIni ini, string name)
+{
+    string s = RouteSec(name);
+    if (!ini.ContainsSection(s)) { haveRoute = false; return; }
+    homeConn = ini.Get(s, "homeConn").ToString("");
+    destConn = ini.Get(s, "destConn").ToString("");
+    bool haveHP = LoadPos(ini, s, "homePos", "homeDock", out homePose.Pos);
+    bool haveDP = LoadPos(ini, s, "destPos", "destDock", out destPose.Pos);
+    bool haveOri = TryVec(ini.Get(s, "homeFwd").ToString(""), out homePose.Fwd)
+                 & TryVec(ini.Get(s, "homeUp").ToString(""), out homePose.Up)
+                 & TryVec(ini.Get(s, "homeConnFwd").ToString(""), out homePose.ConnFwd)
+                 & TryVec(ini.Get(s, "destFwd").ToString(""), out destPose.Fwd)
+                 & TryVec(ini.Get(s, "destUp").ToString(""), out destPose.Up)
+                 & TryVec(ini.Get(s, "destConnFwd").ToString(""), out destPose.ConnFwd);
+    homePose.BaseGridId = ini.Get(s, "homeBaseId").ToInt64(0);
+    destPose.BaseGridId = ini.Get(s, "destBaseId").ToInt64(0);
     path.Clear();
-    var raw = ini.Get("route", "path").ToString("");
+    var raw = ini.Get(s, "path").ToString("");
     if (!string.IsNullOrEmpty(raw))
         foreach (var token in raw.Split(';'))
         {
@@ -1955,10 +2045,76 @@ void LoadRoute()
     if (!haveOri) SynthesizePoses();
     haveRoute = haveHP && haveDP && path.Count > 0 && homeConn != "" && destConn != "";
 }
-bool LoadPos(MyIni ini, string primary, string legacy, out Vector3D pos)
+void RefreshRouteNames()
 {
-    if (TryVec(ini.Get("route", primary).ToString(""), out pos)) return true;
-    return TryVec(ini.Get("route", legacy).ToString(""), out pos);
+    routeNames.Clear();
+    var ini = new MyIni();
+    if (!ini.TryParse(Me.CustomData)) return;
+    var secs = new List<string>();
+    ini.GetSections(secs);
+    foreach (var sec in secs)
+        if (sec.StartsWith("route.")) routeNames.Add(sec.Substring(6));
+    routeNames.Sort();
+}
+void SwitchActiveRoute(string name)
+{
+    name = SanitizeName(name);
+    var ini = new MyIni(); ini.TryParse(Me.CustomData);
+    if (name == "" || !ini.ContainsSection(RouteSec(name))) { statusMsg = "No route '" + name + "'"; return; }
+    activeRoute = name;
+    LoadRouteInto(ini, name);
+    ini.Set("routes", "active", name);
+    Me.CustomData = ini.ToString();
+    statusMsg = "Active route: " + name + " (" + path.Count + "wp)";
+}
+void DeleteRoute(string name)
+{
+    name = SanitizeName(name);
+    if (name == "") { statusMsg = "Usage: DELROUTE <name>"; return; }
+    var ini = new MyIni(); ini.TryParse(Me.CustomData);
+    if (!ini.ContainsSection(RouteSec(name))) { statusMsg = "No route '" + name + "'"; return; }
+    ini.DeleteSection(RouteSec(name));
+    Me.CustomData = ini.ToString();
+    bool wasActive = activeRoute == name;
+    if (wasActive) ActivateFallback(); else RefreshRouteNames();
+    statusMsg = "Deleted route '" + name + "'";
+}
+void ActivateFallback()
+{
+    RefreshRouteNames();
+    var ini = new MyIni(); ini.TryParse(Me.CustomData);
+    if (routeNames.Count > 0)
+    {
+        activeRoute = routeNames[0];
+        LoadRouteInto(ini, activeRoute);
+        ini.Set("routes", "active", activeRoute);
+    }
+    else
+    {
+        activeRoute = "";
+        haveRoute = false; path.Clear(); homeConn = ""; destConn = "";
+        homePose = new DockPose(); destPose = new DockPose();
+        ini.Set("routes", "active", "");
+    }
+    Me.CustomData = ini.ToString();
+}
+string SanitizeName(string raw)
+{
+    if (string.IsNullOrEmpty(raw)) return "";
+    var sb = new StringBuilder();
+    foreach (char c in raw.Trim())
+    {
+        bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
+                  || (c >= 'a' && c <= 'z') || c == '_' || c == '-';
+        if (ok) sb.Append(c);
+        if (sb.Length >= 16) break;
+    }
+    return sb.ToString();
+}
+bool LoadPos(MyIni ini, string section, string primary, string legacy, out Vector3D pos)
+{
+    if (TryVec(ini.Get(section, primary).ToString(""), out pos)) return true;
+    return TryVec(ini.Get(section, legacy).ToString(""), out pos);
 }
 void SynthesizePoses()
 {
@@ -1987,11 +2143,13 @@ Vector3D UpAt(Vector3D pos)
 }
 void ClearRoute()
 {
-    haveRoute = false; path.Clear(); homeConn = ""; destConn = "";
-    homePose = new DockPose(); destPose = new DockPose();
-    var ini = new MyIni(); ini.TryParse(Me.CustomData);
-    ini.DeleteSection("route");
-    Me.CustomData = ini.ToString();
+    if (activeRoute != "")
+    {
+        var ini = new MyIni(); ini.TryParse(Me.CustomData);
+        ini.DeleteSection(RouteSec(activeRoute));
+        Me.CustomData = ini.ToString();
+    }
+    ActivateFallback();
 }
 void LoadState()
 {

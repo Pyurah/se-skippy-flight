@@ -7,8 +7,8 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.2.0 (Slice a delivered — phase-object base controller; behavior identical to
-  Skippy-Shuttle v0.15.0)
+- **Version:** 0.3.0 (Slice a delivered — phase-object base controller; behavior identical to
+  Skippy-Shuttle v0.15.0. Plus multiple named routes with a menu switcher — see Delivered extras)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
@@ -236,6 +236,16 @@ The control tower (pad registry, clearance grants, slot scheduling) as its own s
 
 - Multi-stop routes (generalize `Leg` beyond two poses).
 - Per-item load manifests.
+
+### Delivered extras (outside the slice sequence)
+
+- **Multiple named routes + menu switcher (0.3.0).** Routes are stored one-per-section as
+  `[route.<name>]` with a `[routes] active=<name>` pointer. `RECORD HOME <name>` names a route;
+  a Routes menu page (Record ▸ Routes) lists them and APPLY switches the active one (blocked while
+  operating); `ROUTE <name>` / `DELROUTE <name>` do the same by command. A legacy single `[route]`
+  section migrates once to `[route.Main]`. This is distinct from "multi-stop routes" above — it is
+  *many two-pose routes*, selectable, not one route with many stops. Stripped size after: 81,378
+  chars (18,622 headroom).
 
 ---
 
