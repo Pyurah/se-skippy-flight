@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.8.1";
+const string VERSION = "0.9.0";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -281,6 +281,7 @@ DepartTrigger homeTrigger = DepartTrigger.Auto;   // what releases the shuttle f
 DepartTrigger destTrigger = DepartTrigger.Auto;   // what releases it from the DESTINATION
 string shipName = "Skippy";
 string channel = "SkippyShuttleNet";
+bool useTower = false;        // opt-in tower clearance; Off (default) = fly independently, byte-identical to pre-tower behavior
 string remoteName = "";
 string loadTag = "[SF:LOAD]";
 string unloadTag = "[SF:UNLOAD]";
@@ -365,6 +366,14 @@ double dockBlockTimer = 0;                        // s the docking corridor has 
 double dockClearFor = 0;                          // s the corridor has read clear since a block; must exceed CLEAR_CONFIRM_SEC before a held approach resumes, so we don't lurch forward at a ship still crossing
 double stageStableFor = 0;                        // s the ship has held assembled+aligned at the departure staging fix; must exceed STAGE_CONFIRM_SEC before it commits to cruise (assemble-before-flying, not dive-off-the-pad)
 bool stagingAtFix = false;                         // latched once the ship first reaches the staging fix; from then on it turns to the route heading and never reverts to the dock attitude on sub-metre drift (kills the 57<->113 deg target ping-pong in space). Reset on DepartStaging entry/exit.
+
+// ---- Tower clearance handshake (ephemeral, never persisted; reset on every phase change) ----
+double towerAge = 9999;                            // s since the last CMD|TOWER heartbeat; starts stale so TowerActive() reads false until a real tower is heard (a 0 default would falsely gate every ship)
+bool cleared = false;                              // the tower granted the current gate (matched to reqAction)
+bool clearanceRequested = false;                   // a CMD|REQ has been sent for the current gate wait
+string reqAction = "";                             // "DEPART" or "LAND": which grant a CMD|CLEAR/HOLD must match to apply
+string holdReason = "";                            // last CMD|HOLD reason, surfaced in the status line
+double reqTimer = 0;                               // s since the last CMD|REQ send; drives REQ_RESEND
 
 // ---- Display views (ship role) ---------------------------------------------
 // Each ship screen shows ONE view, so a 3-screen cockpit can split the display
@@ -468,6 +477,14 @@ const double STAGE_CONFIRM_SEC = 1.5;     // s the ship must hold assembled+alig
 const double CLEAR_RANGE_PAD = 5.0;       // m added to the dock distance when checking the camera has charged enough scan range to reach past the mating plane
 const double CLEAR_LEGACY_MARGIN = 5.0;   // m: pre-0.15 routes store no base grid id, so identity can't be checked - treat only a hit this much closer than the dock point as an obstruction (stay conservative; re-record to enable identity checks)
 
+// ---- Tower clearance (optional fleet coordination) -------------------------
+// An optional overlay on the two existing local clearance gates: a ship asks a tower
+// (a separate SkippyTower PB) for clearance before it undocks or taxis onto a connector.
+// The tower announces itself with a periodic CMD|TOWER heartbeat; if none arrives within
+// TOWER_TIMEOUT the ship treats the tower as absent and flies independently (anti-strand).
+const double TOWER_TIMEOUT = 6.0;         // s without a CMD|TOWER heartbeat before the tower counts as offline (a few missed beats) - then the ship proceeds on its local gate alone
+const double REQ_RESEND = 2.0;            // s between CMD|REQ resends while a ship waits at a gate for a grant
+
 // ============================================================================
 //  Lifecycle
 // ============================================================================
@@ -543,7 +560,8 @@ void Main(string argument, UpdateType source)
         // Ship role - re-discover cheaply if the remote vanished (regrind etc.)
         if (rc == null) { Discover(); if (rc == null) { statusMsg = "No Remote Control found"; RenderShip(); return; } }
 
-        DrainIgc();   // accept remote DEPART commands from a station PB
+        DrainIgc();   // accept remote DEPART commands + tower heartbeat/grants from other PBs
+        towerAge += dt; reqTimer += dt;   // age the tower heartbeat and the clearance-request resend clock
 
         // One dispatch, no hand-maintained switch: the current phase object drives
         // this tick and (via the Tick* body it wraps) may advance `phase` for the next.
@@ -584,6 +602,10 @@ void SwitchPhase(PhaseId next)
     phases[phase].Exit(this);
     phase = next;
     phases[phase].Enter(this);
+    // Tower clearance is per-gate: dropping it on every phase change makes the next gate
+    // request fresh, so a DEPART grant can't satisfy a later LAND (nor a home-depart grant
+    // a dest-depart). reqTimer primed at the resend threshold so the first check sends now.
+    cleared = false; clearanceRequested = false; holdReason = ""; reqTimer = REQ_RESEND;
 }
 
 // The Faulted phase's behavior: stop driving, drop control, kill the sorters. Was an
@@ -950,6 +972,10 @@ void TickLoading()
     {
         string why;
         if (!DepartFuelOk(true, out why)) { SetSorters(loadSorters, false); statusMsg = why; return; }
+        // Tower gate: stay docked (out of the corridor) until cleared. A manual/remote
+        // DEPART (departRequested) is an explicit override and bypasses the tower.
+        if (!departRequested && !ClearedToProceed("DEPART", homeConn))
+        { SetSorters(loadSorters, false); statusMsg = TowerWait("DEPART"); return; }
         SetSorters(loadSorters, false);
         departRequested = false;
         BeginLegMeasure(true);
@@ -990,6 +1016,9 @@ void TickUnloading()
         // Round trip: don't leave for home without the fuel to get there.
         string why;
         if (!DepartFuelOk(false, out why)) { statusMsg = why; return; }
+        // Tower gate (same overlay as home): hold at the dock until cleared; DEPART overrides.
+        if (!departRequested && !ClearedToProceed("DEPART", destConn))
+        { statusMsg = TowerWait("DEPART"); return; }
         departRequested = false;
         BeginLegMeasure(false);
         phaseTimer = 0;
@@ -1068,8 +1097,10 @@ void TickUndock()
 //   2. Seamless handoff: it hands cruise a ship already pointed down the route (matching
 //      the EXACT attitude RunCruiseControl will hold), so cruise engages without the
 //      spin-and-slide it would otherwise do.
-// The confirm dwell (stageStableFor >= STAGE_CONFIRM_SEC) is the local "clearance to
-// depart" gate; a tower grant slots in here later.
+// The confirm dwell (stageStableFor >= STAGE_CONFIRM_SEC) is the local assemble-before-
+// flying gate. Tower clearance is NOT gated here: it's applied one step earlier, at the
+// Loading/Unloading -> Undock commit, so a ship waiting on the tower stays on its connector
+// (out of the corridor) rather than undocking into contested airspace first.
 void TickDepartStaging()
 {
     bool fromHome = leg.Outbound;
@@ -1624,8 +1655,8 @@ bool RunCruiseControl()
 // corridor is clear and confirmed, then hand to Taxi for the final commit. Two jobs:
 //
 //   * Clearance gate. A craft NEVER flies from cruise straight onto a connector - it waits
-//     here until DockCorridorBlocked reads clear for CLEAR_CONFIRM_SEC (a tower grant will
-//     slot in here later). Taxi is the only phase that touches the connector.
+//     here until DockCorridorBlocked reads clear for CLEAR_CONFIRM_SEC and, when a tower is
+//     live, until it grants the landing. Taxi is the only phase that touches the connector.
 //   * Gravity-gated reorient. Rotating to the dock attitude swings the ship's strong thrust
 //     axis off anti-gravity, gutting braking authority - dangerous if done while still
 //     descending in gravity. So in gravity we hold a level, belly-down attitude (lift bank
@@ -1687,11 +1718,14 @@ void TickHolding()
         dockBlockTimer = 0;   // confirmed clear
     }
 
-    // Cleared. Commit to Taxi only once settled at the fix in the dock attitude (posed =
-    // arrived, aligned to the dock pose, and stopped) - i.e. reoriented and no longer moving.
+    // Local corridor clear. Commit to Taxi only once settled at the fix in the dock attitude
+    // (posed = arrived, aligned to the dock pose, and stopped) - i.e. reoriented and no longer
+    // moving - AND, if a tower is live, once it has granted the landing.
     statusMsg = (toDest ? "Holding at destination" : "Holding at home") + " - cleared";
     if (posed)
     {
+        if (!ClearedToProceed("LAND", toDest ? destConn : homeConn))
+        { statusMsg = (toDest ? "Holding at destination" : "Holding at home") + " - " + TowerWait("LAND"); return; }
         phaseTimer = 0;
         SwitchPhase(PhaseId.Taxi);
     }
@@ -2359,10 +2393,42 @@ double CargoFillPct()
     return max <= 0 ? 0 : cur / max * 100.0;
 }
 
+// ---- Tower clearance -------------------------------------------------------
+// True only while an opted-in ship is hearing a live tower. No heartbeat within
+// TOWER_TIMEOUT (or useTower off) => independent operation on the local gate alone.
+bool TowerActive() { return useTower && towerAge < TOWER_TIMEOUT; }
+
+// The single gate the flight loop consults before committing to a controlled move
+// (undock, or taxi onto a connector). Returns true to proceed. When a tower is live
+// but hasn't granted this action, it (re)sends CMD|REQ on the resend interval and
+// returns false so the caller holds. `action` is "DEPART" or "LAND"; `dock` names
+// the connector for the tower's benefit.
+bool ClearedToProceed(string action, string dock)
+{
+    if (!TowerActive()) return true;                    // no tower / disabled -> proceed independently
+    if (cleared && reqAction == action) return true;    // granted for this action
+    if (!clearanceRequested || reqTimer >= REQ_RESEND)
+    {
+        IGC.SendBroadcastMessage(channel, "CMD|REQ|" + shipName + "|" + action + "|" + dock);
+        // Fresh request => not yet granted for it. Clearing here (not just in SwitchPhase) drops
+        // any stale grant left over when the action changes within a phase, so a leftover DEPART
+        // clear can never satisfy a LAND gate.
+        clearanceRequested = true; reqAction = action; reqTimer = 0; cleared = false;
+    }
+    return false;
+}
+
+// Status line while waiting at a tower gate (a HOLD reason wins over the generic wait).
+string TowerWait(string action)
+{
+    return holdReason.Length > 0 ? "HOLD: " + holdReason : "Awaiting tower - " + action;
+}
+
 // ---- Remote / manual departure --------------------------------------------
 // Accept DEPART commands broadcast by a station PB. Command messages are tagged
 // "CMD|..." so they're never confused with the pipe-delimited status reports the
-// ship itself broadcasts on the same channel (which the base consumes).
+// ship itself broadcasts on the same channel (which the base consumes). Tower
+// clearance rides the same CMD| family (TOWER heartbeat, CLEAR/HOLD grants).
 void DrainIgc()
 {
     if (listener == null) return;
@@ -2372,12 +2438,18 @@ void DrainIgc()
         var s = m.Data as string;
         if (string.IsNullOrEmpty(s) || !s.StartsWith("CMD|")) continue;   // ignore status broadcasts
         var f = s.Split('|');
-        if (f.Length >= 2 && f[1] == "DEPART")
+        if (f.Length < 2) continue;
+        if (f[1] == "DEPART")
         {
             string who = f.Length >= 3 ? f[2] : "*";
             if (who == "*" || who.Equals(shipName, StringComparison.OrdinalIgnoreCase))
                 RequestDepart();
         }
+        else if (f[1] == "TOWER") towerAge = 0;   // heartbeat: a tower is live on this channel
+        else if (f[1] == "CLEAR" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
+        { cleared = true; holdReason = ""; }
+        else if (f[1] == "HOLD" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
+        { cleared = false; holdReason = f.Length >= 5 ? f[4] : "hold"; }
     }
 }
 
@@ -2537,7 +2609,7 @@ int MenuCount()
         case PAGE_MAIN:     return 6;   // Start/Stop, Run Mode, Depart Now, Go Home, Record, Settings
         case PAGE_RECORD:   return 5;   // Home, Dest, Clear, Routes, Back
         case PAGE_SETTINGS: return 6;   // Cruise, Dock, MaxMass, DepartFill, Depart page, Back
-        case PAGE_DEPART:   return 7;   // Home trig, Dest trig, Dwell, MinH2, MinBatt, Margin, Back
+        case PAGE_DEPART:   return 8;   // Home trig, Dest trig, Dwell, MinH2, MinBatt, Margin, Tower, Back
         case PAGE_ROUTES:   return routeNames.Count + 1;   // one item per saved route + Back
         default:            return 1;
     }
@@ -2609,7 +2681,8 @@ void MenuApply()
             case 3: BeginEdit(minHydrogenPct); break;
             case 4: BeginEdit(minBatteryPct); break;
             case 5: BeginEdit(fuelMarginPct); break;
-            case 6: menuPage = PAGE_SETTINGS; menuIndex = 4; break;
+            case 6: useTower = !useTower; SaveCfg("useTower", useTower ? "auto" : "off"); statusMsg = "Tower = " + (useTower ? "Auto" : "Off"); break;
+            case 7: menuPage = PAGE_SETTINGS; menuIndex = 4; break;
         }
     }
 }
@@ -2740,6 +2813,7 @@ List<string> MenuLabels()
         l.Add("Min H2: " + FmtSetting(3, minHydrogenPct) + " %");
         l.Add("Min Bat: " + FmtSetting(4, minBatteryPct) + " %");
         l.Add("Margin: " + FmtSetting(5, fuelMarginPct) + " %");
+        l.Add("Tower: " + (useTower ? "Auto" : "Off"));
         l.Add("<< Back");
     }
     return l;
@@ -3160,6 +3234,7 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("sf", "role", role == Role.Base ? "base" : "shuttle");
     ini.Set("sf", "shipName", shipName);
     ini.Set("sf", "channel", channel);
+    ini.Set("sf", "useTower", useTower ? "auto" : "off");
     ini.Set("sf", "runMode", modeStr);
     ini.Set("sf", "homeTrigger", homeTrigger.ToString());
     ini.Set("sf", "destTrigger", destTrigger.ToString());
@@ -3204,6 +3279,7 @@ void LoadConfig()
     role = (roleStr == "base" || roleStr == "station") ? Role.Base : Role.Shuttle;
     shipName = ini.Get("sf", "shipName").ToString(shipName);
     channel = ini.Get("sf", "channel").ToString(channel);
+    useTower = ini.Get("sf", "useTower").ToString(useTower ? "auto" : "off").Trim().ToLowerInvariant() == "auto";
     // Run mode. Legacy WAITFULL folds into Continuous + a Cargo home trigger, but
     // only supplies that default if no explicit homeTrigger key is present, so a new
     // config's homeTrigger always wins.

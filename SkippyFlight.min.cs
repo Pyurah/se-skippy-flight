@@ -1,4 +1,4 @@
-const string VERSION = "0.8.1";
+const string VERSION = "0.9.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -153,6 +153,7 @@ DepartTrigger homeTrigger = DepartTrigger.Auto;
 DepartTrigger destTrigger = DepartTrigger.Auto;
 string shipName = "Skippy";
 string channel = "SkippyShuttleNet";
+bool useTower = false;
 string remoteName = "";
 string loadTag = "[SF:LOAD]";
 string unloadTag = "[SF:UNLOAD]";
@@ -219,6 +220,12 @@ double dockBlockTimer = 0;
 double dockClearFor = 0;
 double stageStableFor = 0;
 bool stagingAtFix = false;
+double towerAge = 9999;
+bool cleared = false;
+bool clearanceRequested = false;
+string reqAction = "";
+string holdReason = "";
+double reqTimer = 0;
 const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
 int menuPage = PAGE_MAIN;
@@ -279,6 +286,8 @@ const double CLEAR_CONFIRM_SEC = 1.5;
 const double STAGE_CONFIRM_SEC = 1.5;
 const double CLEAR_RANGE_PAD = 5.0;
 const double CLEAR_LEGACY_MARGIN = 5.0;
+const double TOWER_TIMEOUT = 6.0;
+const double REQ_RESEND = 2.0;
 Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
@@ -336,6 +345,7 @@ void Main(string argument, UpdateType source)
         if (role == Role.Base) { RunBase(); return; }
         if (rc == null) { Discover(); if (rc == null) { statusMsg = "No Remote Control found"; RenderShip(); return; } }
         DrainIgc();
+        towerAge += dt; reqTimer += dt;
         phases[phase].Tick(this);
         Runtime.UpdateFrequency = phases[phase].IsFlightControl ? UpdateFrequency.Update1 : UpdateFrequency.Update10;
         sinceRender += dt;
@@ -359,6 +369,7 @@ void SwitchPhase(PhaseId next)
     phases[phase].Exit(this);
     phase = next;
     phases[phase].Enter(this);
+    cleared = false; clearanceRequested = false; holdReason = ""; reqTimer = REQ_RESEND;
 }
 void TickFaulted()
 {
@@ -647,6 +658,8 @@ void TickLoading()
     {
         string why;
         if (!DepartFuelOk(true, out why)) { SetSorters(loadSorters, false); statusMsg = why; return; }
+        if (!departRequested && !ClearedToProceed("DEPART", homeConn))
+        { SetSorters(loadSorters, false); statusMsg = TowerWait("DEPART"); return; }
         SetSorters(loadSorters, false);
         departRequested = false;
         BeginLegMeasure(true);
@@ -678,6 +691,8 @@ void TickUnloading()
         }
         string why;
         if (!DepartFuelOk(false, out why)) { statusMsg = why; return; }
+        if (!departRequested && !ClearedToProceed("DEPART", destConn))
+        { statusMsg = TowerWait("DEPART"); return; }
         departRequested = false;
         BeginLegMeasure(false);
         phaseTimer = 0;
@@ -1131,6 +1146,8 @@ void TickHolding()
     statusMsg = (toDest ? "Holding at destination" : "Holding at home") + " - cleared";
     if (posed)
     {
+        if (!ClearedToProceed("LAND", toDest ? destConn : homeConn))
+        { statusMsg = (toDest ? "Holding at destination" : "Holding at home") + " - " + TowerWait("LAND"); return; }
         phaseTimer = 0;
         SwitchPhase(PhaseId.Taxi);
     }
@@ -1565,6 +1582,22 @@ double CargoFillPct()
     }
     return max <= 0 ? 0 : cur / max * 100.0;
 }
+bool TowerActive() { return useTower && towerAge < TOWER_TIMEOUT; }
+bool ClearedToProceed(string action, string dock)
+{
+    if (!TowerActive()) return true;
+    if (cleared && reqAction == action) return true;
+    if (!clearanceRequested || reqTimer >= REQ_RESEND)
+    {
+        IGC.SendBroadcastMessage(channel, "CMD|REQ|" + shipName + "|" + action + "|" + dock);
+        clearanceRequested = true; reqAction = action; reqTimer = 0; cleared = false;
+    }
+    return false;
+}
+string TowerWait(string action)
+{
+    return holdReason.Length > 0 ? "HOLD: " + holdReason : "Awaiting tower - " + action;
+}
 void DrainIgc()
 {
     if (listener == null) return;
@@ -1574,12 +1607,18 @@ void DrainIgc()
         var s = m.Data as string;
         if (string.IsNullOrEmpty(s) || !s.StartsWith("CMD|")) continue;
         var f = s.Split('|');
-        if (f.Length >= 2 && f[1] == "DEPART")
+        if (f.Length < 2) continue;
+        if (f[1] == "DEPART")
         {
             string who = f.Length >= 3 ? f[2] : "*";
             if (who == "*" || who.Equals(shipName, StringComparison.OrdinalIgnoreCase))
                 RequestDepart();
         }
+        else if (f[1] == "TOWER") towerAge = 0;
+        else if (f[1] == "CLEAR" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
+        { cleared = true; holdReason = ""; }
+        else if (f[1] == "HOLD" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
+        { cleared = false; holdReason = f.Length >= 5 ? f[4] : "hold"; }
     }
 }
 void RequestDepart()
@@ -1696,7 +1735,7 @@ int MenuCount()
         case PAGE_MAIN:     return 6;
         case PAGE_RECORD:   return 5;
         case PAGE_SETTINGS: return 6;
-        case PAGE_DEPART:   return 7;
+        case PAGE_DEPART:   return 8;
         case PAGE_ROUTES:   return routeNames.Count + 1;
         default:            return 1;
     }
@@ -1764,7 +1803,8 @@ void MenuApply()
             case 3: BeginEdit(minHydrogenPct); break;
             case 4: BeginEdit(minBatteryPct); break;
             case 5: BeginEdit(fuelMarginPct); break;
-            case 6: menuPage = PAGE_SETTINGS; menuIndex = 4; break;
+            case 6: useTower = !useTower; SaveCfg("useTower", useTower ? "auto" : "off"); statusMsg = "Tower = " + (useTower ? "Auto" : "Off"); break;
+            case 7: menuPage = PAGE_SETTINGS; menuIndex = 4; break;
         }
     }
 }
@@ -1882,6 +1922,7 @@ List<string> MenuLabels()
         l.Add("Min H2: " + FmtSetting(3, minHydrogenPct) + " %");
         l.Add("Min Bat: " + FmtSetting(4, minBatteryPct) + " %");
         l.Add("Margin: " + FmtSetting(5, fuelMarginPct) + " %");
+        l.Add("Tower: " + (useTower ? "Auto" : "Off"));
         l.Add("<< Back");
     }
     return l;
@@ -2203,6 +2244,7 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("sf", "role", role == Role.Base ? "base" : "shuttle");
     ini.Set("sf", "shipName", shipName);
     ini.Set("sf", "channel", channel);
+    ini.Set("sf", "useTower", useTower ? "auto" : "off");
     ini.Set("sf", "runMode", modeStr);
     ini.Set("sf", "homeTrigger", homeTrigger.ToString());
     ini.Set("sf", "destTrigger", destTrigger.ToString());
@@ -2245,6 +2287,7 @@ void LoadConfig()
     role = (roleStr == "base" || roleStr == "station") ? Role.Base : Role.Shuttle;
     shipName = ini.Get("sf", "shipName").ToString(shipName);
     channel = ini.Get("sf", "channel").ToString(channel);
+    useTower = ini.Get("sf", "useTower").ToString(useTower ? "auto" : "off").Trim().ToLowerInvariant() == "auto";
     string modeStr = ini.Get("sf", "runMode").ToString("CONTINUOUS").Trim().ToUpperInvariant();
     string defHome = "Auto";
     if (modeStr == "WAITFULL") { runMode = RunMode.Continuous; defHome = "Cargo"; }

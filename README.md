@@ -57,6 +57,7 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 | `role` | `shuttle` | `shuttle` (flies) or `base` / `station` (renders the board) |
 | `shipName` | `Skippy` | Label shown on the base board |
 | `channel` | `SkippyShuttleNet` | IGC channel — **must match** on ship and base |
+| `useTower` | `off` | `off` (default) flies independently; `auto` obeys an optional control tower — the ship requests clearance before undocking and before taxiing onto a connector, holding until granted. If no tower is broadcasting on the channel it stays independent, so `auto` is safe to leave on |
 | `runMode` | `CONTINUOUS` | Trip cycle: `CONTINUOUS`, `ONETRIP`, or `ONEWAY` (departure is a *separate* setting — see below) |
 | `homeTrigger` | `Auto` | What releases the shuttle **from home**: `Auto`, `Cargo`, `Timer`, `Manual` |
 | `destTrigger` | `Auto` | What releases the shuttle **from the destination** (same four options) |

@@ -7,19 +7,19 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.7.0 (Slice c delivered — scenario-aware cruise: each leg classifies from its two
-  docks' recorded gravity into PlanetLocal / Ascent / Descent / SpaceLocal, and the single cruise
-  splits into `Climb → Cruise → Descent` stages as the scenario demands. The stages reuse the exact
-  cruise flight law with optional per-stage speed governors (`climbSpeed`/`descentSpeed`,
-  default = `cruiseSpeed`, so a no-op until lowered) and distinct operator labels. Precise
-  altitude-based boundaries stay in Slice d; this slice uses a coarse gravity/distance proxy. Built
-  on Slice b's `DepartStaging`/`Holding`/`Taxi` phases with derived
-  outer stand-off fixes and the local clearance gate. The ship assembles at a staging fix before
-  flying and holds at an arrival fix before docking; only the clearance-gated `Taxi` phase ever
-  touches a connector. Reorientation to the dock attitude is gravity-gated. Plus Slice a's
-  phase-object base controller, multiple named routes, and the telemetry debug view. Block tags
-  and Custom Data sections are now keyed to `SF` — `[SF]`/`[SF:LOAD]`/`[SF:CAM]`, the `[sf]` config
-  section, and `[sf-screens]` — with lossless auto-migration from the old `[shuttle]` layout.)
+- **Version:** 0.9.0 (Slice e delivered — **tower clearance, shuttle side**: an optional
+  traffic-control overlay on the two clearance gates a ship already runs locally. With `useTower`
+  on and a tower broadcasting a `CMD|TOWER` heartbeat, the ship requests clearance (`CMD|REQ`) and
+  holds at the `Loading/Unloading → Undock` and `Holding → Taxi` commits until the tower grants
+  (`CMD|CLEAR`) — denials (`CMD|HOLD`) surface a reason. All verbs are additive on the existing IGC
+  channel; the `CMD|DEPART` override still departs instantly. Default `Off` is byte-identical to
+  before, and even `Auto` flies independently until a live tower is actually heard — if the tower
+  goes silent past `TOWER_TIMEOUT` the ship reverts to independent operation (anti-stranding). All
+  handshake state is ephemeral. The tower PB itself is Slice f. Built on Slice d's altitude-trend
+  `Climb → Cruise → Descent` boundaries for same-planet legs; Slice c's scenario-aware cruise;
+  Slice b's `DepartStaging`/`Holding`/`Taxi` phases with derived stand-off fixes and the local
+  clearance gate; and Slice a's phase-object base controller, multiple named routes, and telemetry
+  debug view. Block tags and Custom Data sections are keyed to `SF`.)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
@@ -354,7 +354,7 @@ and detects the climb-out plateau and the descent to the dock. Fully automatic �
       obstacles). Now those paths refuse with a clear status; real-endpoint and undocked-resume
       starts are unchanged. Rebuild: **95,237 chars (4,763 headroom, +786 vs 0.8.0)**, braces balanced (498/498).
 
-### Slice e — tower clearance (shuttle side)
+### Slice e — tower clearance (shuttle side) — ✅ delivered (v0.9.0)
 
 Layer the tower overlay (see **Traffic control / holding** above) onto the two existing commit
 points, keeping the local gates intact and independent operation as the fallback. This slice is
@@ -373,26 +373,28 @@ is a no-op, so this slice ships without regression.
   bypasses everything.
 
 **Ship-side additions:**
-- [ ] Config `useTower` (Auto/Off), persisted in `[sf]` and per-`[route.<name>]` override;
-      new row on the Depart settings page (`PAGE_DEPART` 7 → 8 items).
-- [ ] State: `towerAge` (since last heartbeat), `towerActive = useTower==Auto && towerAge <
-      TOWER_TIMEOUT`; per-pending-action `clearanceRequested` / `cleared` / `holdReason`; consts
-      `TOWER_TIMEOUT`, `REQ_RESEND`.
-- [ ] `DrainIgc` extended to parse `TOWER` (reset `towerAge`), `CLEAR` (set `cleared` for the
+- [x] Config `useTower` (Auto/Off), persisted in `[sf]`; new **Tower: Auto/Off** row on the Depart
+      settings page (`PAGE_DEPART` 7 → 8 items). *(Per-`[route.<name>]` override deferred — not
+      worth the bytes this slice; the global toggle covers the common case.)*
+- [x] State: `towerAge` (since last heartbeat, init stale at 9999), `TowerActive() = useTower &&
+      towerAge < TOWER_TIMEOUT`; per-action `clearanceRequested` / `cleared` / `reqAction` /
+      `holdReason`; consts `TOWER_TIMEOUT` (6 s), `REQ_RESEND` (2 s). All ephemeral, reset in
+      `SwitchPhase` (no `Save()`/`LoadState()` change).
+- [x] `DrainIgc` extended to parse `TOWER` (reset `towerAge`), `CLEAR` (set `cleared` for the
       addressed action), `HOLD` (keep holding + capture reason). `DEPART` force path unchanged.
-- [ ] Helper `bool ClearedToProceed(string action, string dock)` — returns `!towerActive ||
-      cleared`; while blocked, (re)sends `CMD|REQ` on the `REQ_RESEND` interval and sets the status
-      line. Called as the final AND after `DepartureAllowed && DepartFuelOk` in `TickLoading`/
-      `TickUnloading`, and after the corridor-clear + confirm dwell in the `Holding`→`Taxi` commit.
-- [ ] Status surfacing: `Holding - awaiting tower (DEPART)`, the tower's `HOLD` reason when given,
-      and `Tower: independent (no signal)` after a timeout revert. Telemetry view shows
-      `Tower age`/`active`.
-- [ ] Edge cases proven in-world: tower dies mid-hold → reverts to independent after
+- [x] Helper `bool ClearedToProceed(string action, string dock)` — returns `!TowerActive() ||
+      cleared`; while blocked, (re)sends `CMD|REQ` on the `REQ_RESEND` interval; `TowerWait()` sets
+      the status line. Called after `DepartureAllowed && DepartFuelOk` in `TickLoading`/
+      `TickUnloading` (bypassed by `departRequested`), and after the corridor-clear + confirm dwell
+      in the `Holding`→`Taxi` commit.
+- [x] Status surfacing: "Awaiting tower - DEPART/LAND" at each gate and "HOLD: <reason>" on a deny.
+      *(Dedicated telemetry Tower line deferred — the status line + menu row already surface it.)*
+- [ ] Edge cases to prove in-world: tower dies mid-hold → reverts to independent after
       `TOWER_TIMEOUT`; recompile mid-hold → re-`REQ`s and re-grants (no persisted clearance);
       operator `DEPART` during a tower hold → override wins; `useTower=Off` → byte-for-byte
       current behavior.
-- [ ] Rebuild + budget check (`python tools/build-min.py`); record stripped size (est. modest —
-      one setting, one gate helper, ~4 message cases, status strings; current headroom ~10,966).
+- [x] Rebuild + budget check (`python tools/build-min.py`): stripped **97,498 chars**
+      (2,502 headroom, +2,261 vs 0.8.1), braces balanced 507/507.
 
 ### Slice f — SkippyTower.cs
 

@@ -4,6 +4,43 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-08-14
+
+Slice e — **tower clearance (shuttle side).** An optional traffic-control overlay that layers on top
+of the two clearance gates a ship already runs locally (the departure decision at the dock and the
+arrival corridor check at the holding fix). When enabled and a tower is broadcasting, a ship asks
+for clearance before it undocks or taxis onto a connector and holds until the grant arrives — so two
+shuttles sharing a station can no longer both undock or both taxi into the same corridor. The tower
+PB itself is a later slice; this release is shuttle-side only and is a **no-op unless a tower is
+actually heard**.
+
+### Added
+- **`useTower` config (`Auto`/`Off`, default `Off`)** in the `[sf]` section, with a matching **Tower:
+  Auto/Off** row on the DEPART menu page. Off (the default) is byte-for-byte the previous behavior.
+- **Tower-clearance handshake** over the existing IGC channel, all additive `CMD|`-family verbs so
+  existing status broadcasts and the `CMD|DEPART` override are untouched:
+  - `CMD|TOWER|<zone>` — tower heartbeat; a ship that hasn't heard one within `TOWER_TIMEOUT` (6 s)
+    treats the tower as offline and flies independently (anti-stranding).
+  - `CMD|REQ|<ship>|<DEPART|LAND>|<dock>` — the ship's clearance request, resent every `REQ_RESEND`
+    (2 s) while it waits at a gate.
+  - `CMD|CLEAR|<ship>|<DEPART|LAND>` / `CMD|HOLD|<ship>|<DEPART|LAND>[|<reason>]` — grant / deny; a
+    HOLD reason surfaces on the status line ("HOLD: <reason>").
+- **Two gate hooks** consulted only when a tower is live: the `Loading`/`Unloading → Undock` commit
+  (the ship stays docked, out of the corridor, until cleared) and the `Holding → Taxi` commit (holds
+  at the outer fix until the landing is granted). Status shows "Awaiting tower - DEPART/LAND".
+
+### Changed
+- A manual/remote `CMD|DEPART` override now also bypasses the departure tower gate — an explicit
+  human/station command always departs immediately.
+
+### Notes
+- Clearance state (`towerAge`, `cleared`, `holdReason`, …) is ephemeral: never persisted and reset on
+  every phase change, so each gate requests fresh and a recompile simply re-requests. No changes to
+  `Save()`/`LoadState()`. The base board is unaffected (it drops the short `CMD|` verbs).
+- Deferred as not worth the bytes this slice: per-route `useTower` override and a telemetry Tower
+  line (the status line and menu row already surface tower state).
+- Stripped size **97,498 chars** (2,502 headroom, +2,261 vs 0.8.1), braces balanced (507/507).
+
 ## [0.8.1] - 2026-08-14
 
 ### Fixed
