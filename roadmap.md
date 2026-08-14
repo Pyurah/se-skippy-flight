@@ -7,9 +7,11 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.4.1 (Slice a delivered — phase-object base controller; behavior identical to
-  Skippy-Shuttle v0.15.0. Plus multiple named routes with a menu switcher, and a telemetry
-  debug view — see Delivered extras. 0.4.1 fixes the space-undock attitude swing.)
+- **Version:** 0.5.0 (Slice b delivered — `DepartStaging`/`Holding`/`Taxi` phases with derived
+  outer stand-off fixes and the local clearance gate. The ship assembles at a staging fix before
+  flying and holds at an arrival fix before docking; only the clearance-gated `Taxi` phase ever
+  touches a connector. Reorientation to the dock attitude is gravity-gated. Plus Slice a's
+  phase-object base controller, multiple named routes, and the telemetry debug view.)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
@@ -185,6 +187,8 @@ context (same decoupling, lower char cost).
 
 Baseline (v0.1.0, unmodified copy): stripped **70,780 chars**, **29,220** headroom.
 After Slice a (v0.2.0, phase objects): stripped **75,112 chars**, **24,888** headroom (+4,332).
+After Slice b (v0.5.0, staging/holding/taxi): stripped **87,841 chars**, **12,159** headroom
+(+4,368 vs 0.4.1; the intervening named-routes and telemetry extras account for the rest).
 
 ---
 
@@ -207,11 +211,27 @@ replaces the flat enum. No new phases, no scenario logic. Proves the abstraction
 - [x] Rebuild + budget check; version → 0.2.0. **Stripped: 75,112 chars (24,888 headroom;
       +4,333 vs the 0.1.0 copy).** Braces balanced.
 
-### Slice b — staging, holding & taxi (the anti-dive guarantee)
+### Slice b — staging, holding & taxi (the anti-dive guarantee) — delivered, 0.5.0
 
 Add `DepartStaging`, `Holding`, `Taxi` phases with derived stand-off fixes (`holdDist` config) and
 the local clearance gate. Assemble before flying, hold clear before docking, never straight onto a
 connector.
+
+- [x] `DepartStaging` phase — Undock only clears the connector (backs to the inner stand-off,
+      holding dock attitude, no rotation); the route-heading turn moved here (fly out to the outer
+      staging fix, rotate to cruise's exact attitude, `STAGE_CONFIRM_SEC` dwell, then Cruise).
+- [x] `Holding` phase — Cruise hands off at the outer holding fix; station-keep until the corridor
+      is clear + `CLEAR_CONFIRM_SEC`; **gravity-gated reorient** (hold level/belly-down for braking
+      until stopped in gravity, then rotate to dock attitude; blend straight to dock attitude in
+      space). Commits to `Taxi` only when settled at the fix in the dock attitude.
+- [x] `Taxi` phase — the cleared final move down the connector axis onto the connector; corridor
+      foul mid-taxi falls back to `Holding` rather than pressing in.
+- [x] `holdDist` config + per-dock `homeHoldDist`/`destHoldDist` route overrides (forced clear
+      outside the inner stand-off); persisted in `[shuttle]` and each `[route.<name>]`.
+- [x] `BuildLeg` final waypoint → the arrival holding fix; per-end `EffHoldDist` crumb-skip radius.
+- [x] Legacy `Approach` phase delegates to `TickHolding`; IGC wire names unchanged for a
+      Skippy-Shuttle base board. Rebuild + budget check: **87,841 chars (12,159 headroom)**, braces
+      balanced (448/448).
 
 ### Slice c — flight plan + scenario
 

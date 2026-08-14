@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.4.1";
+const string VERSION = "0.5.0";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -78,6 +78,7 @@ struct DockPose
     public Vector3D Up;       // Remote Control world up while docked
     public Vector3D ConnFwd;  // bound connector's world forward (points into the dock)
     public long BaseGridId;   // EntityId of the static grid this dock belongs to; lets the clearance raycast tell the base from a foreign ship parked on the connector (0 = unknown / pre-0.15 route)
+    public double HoldDist;   // per-dock override [m] for the outer staging/holding fix distance; 0 = use the global holdDist. Set by hand in the route section for docks where the global stand-off isn't clear of the geometry.
 }
 // A flight phase, decoupled from direction. What used to be the direction-baked
 // State enum (UndockHome/UndockDest, CruiseToDest/CruiseToHome, ...) is now one
@@ -86,16 +87,21 @@ struct DockPose
 // A phase-object controller drives the loop; see FlightPhase below.
 enum PhaseId
 {
-    Idle,        // parked, waiting for a command / next cycle
-    Recording,   // teaching a route (path breadcrumbs are being captured)
-    Loading,     // at home, load sorter on, filling to threshold (always outbound)
-    Undock,      // released the current connector, backing off to the stand-off
-    Cruise,      // controller flying the (possibly reversed) recorded path
-    Approach,    // precision final approach into the target connector
-    Unloading,   // at destination, unload sorter on, draining (always inbound)
-    Faulted      // something went wrong; needs operator attention
-    // Reserved for later slices (see roadmap.md): DepartStaging, Climb, Descent,
-    // Holding, Taxi. Adding them here does NOT double the enum - direction is Leg.
+    Idle,          // parked, waiting for a command / next cycle
+    Recording,     // teaching a route (path breadcrumbs are being captured)
+    Loading,       // at home, load sorter on, filling to threshold (always outbound)
+    Undock,        // released the current connector, backing off to the inner stand-off
+    DepartStaging, // flown out to the departure staging fix; rotates to the route heading there
+    Cruise,        // controller flying the (possibly reversed) recorded path
+    Holding,       // station-keeping at the arrival holding fix; reorients to the dock attitude
+    Taxi,          // the cleared final move: from the holding fix down the connector axis
+    Approach,      // legacy alias for Holding (kept so an in-flight ship resumes across the swap)
+    Unloading,     // at destination, unload sorter on, draining (always inbound)
+    Faulted        // something went wrong; needs operator attention
+    // The anti-dive guarantee (roadmap Slice b): every dock is bracketed by a staging
+    // fix on departure (DepartStaging) and a holding fix on arrival (Holding); Taxi is
+    // the ONLY phase that moves the ship onto the connector. Reserved for later slices:
+    // Climb, Descent. Adding phases here does NOT double the enum - direction is Leg.
 }
 
 // The current traversal context: which way we're flying and (by extension) which
@@ -162,6 +168,15 @@ class UndockPhase : FlightPhase
     public override void Tick(Program p) { p.TickUndock(); }
 }
 
+class DepartStagingPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.DepartStaging; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Staging"; } }
+    public override void Enter(Program p) { p.stageStableFor = 0; }
+    public override void Tick(Program p) { p.TickDepartStaging(); }
+}
+
 class CruisePhase : FlightPhase
 {
     public override PhaseId Id { get { return PhaseId.Cruise; } }
@@ -170,12 +185,35 @@ class CruisePhase : FlightPhase
     public override void Tick(Program p) { p.TickCruise(); }
 }
 
+class HoldingPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Holding; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Holding"; } }
+    // Fresh clearance accounting each time we arrive at the holding fix.
+    public override void Enter(Program p) { p.dockBlockTimer = 0; p.dockClearFor = 0; }
+    public override void Tick(Program p) { p.TickHolding(); }
+}
+
+class TaxiPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Taxi; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Taxi"; } }
+    public override void Tick(Program p) { p.TickTaxi(); }
+}
+
+// Legacy alias: normal flow no longer enters Approach, but a ship whose [state] was
+// written by a pre-0.5.0 script (phase "Approach") still resumes here after the swap.
+// It runs the holding logic - decelerate, reorient, clear, then Taxi - so an in-flight
+// upgrade converges instead of stranding. The IGC wire name stays "Approach*".
 class ApproachPhase : FlightPhase
 {
     public override PhaseId Id { get { return PhaseId.Approach; } }
     public override bool IsFlightControl { get { return true; } }
-    public override string Label { get { return "Docking"; } }
-    public override void Tick(Program p) { p.TickApproach(); }
+    public override string Label { get { return "Holding"; } }
+    public override void Enter(Program p) { p.dockBlockTimer = 0; p.dockClearFor = 0; }
+    public override void Tick(Program p) { p.TickHolding(); }
 }
 
 class UnloadingPhase : FlightPhase
@@ -220,7 +258,8 @@ double fuelMarginPct = 25;        // [%] safety headroom added to the measured p
 double segMeters = 250;
 double turnDegrees = 12;
 double simplifyMeters = 15;       // [m] max deviation from a straight chord before a waypoint is kept; collapses straight runs so they don't burn the MAX_PATH budget (0 = off, dense recording)
-double approachDist = 15;         // [m] on-axis stand-off where cruise hands to the docking controller
+double approachDist = 15;         // [m] inner on-axis stand-off; the Taxi start point, where the ship commits down the connector axis
+double holdDist = 40;             // [m] outer on-axis stand-off; the departure staging fix / arrival holding fix. Always forced >= approachDist+5 so it sits clear outside the inner stand-off. Per-dock override via homeHoldDist/destHoldDist route keys.
 float gyroRpmCap = 0f;            // gyro rate cap [rpm]; 0 = auto (15 small grid / 5 large) - PAM's gentle-rotation values
 double brakeFrac = 0.6;           // fraction of the weakest-axis thrust reserved for braking/cornering (headroom for gravity + saturation)
 double cornerLen = 30;            // [m] corner-rounding length; also the look-ahead blend distance
@@ -275,8 +314,9 @@ double cruiseProgTimer = 0;                     // seconds since the ship last c
 double cruiseBestDist = double.MaxValue;        // closest approach so far to the current waypoint; getting nearer resets the watchdog. A simplified straight is one waypoint tens of km away, so timing waypoint *arrivals* false-faults on a leg the ship is flying perfectly (v0.13.2)
 bool cruiseFlyLevel = false;                    // latched decision (with hysteresis) for auto cruiseAttitude: true = fly belly-down/VTOL, false = nose-to-path. See UseLevelFlight
 bool gyroResting = false;                        // latch: gyros held inert on-heading during coast-hold (see AlignTo). Wakes only on real heading drift, not angular-velocity noise from thruster torque - stops the gyros fighting the translation controller at cruise
-double dockBlockTimer = 0;                        // s the docking corridor has read continuously blocked (see TickApproach); drives the optional dockBlockSec give-up and the status readout
+double dockBlockTimer = 0;                        // s the docking corridor has read continuously blocked (see TickHolding/TickTaxi); drives the optional dockBlockSec give-up and the status readout
 double dockClearFor = 0;                          // s the corridor has read clear since a block; must exceed CLEAR_CONFIRM_SEC before a held approach resumes, so we don't lurch forward at a ship still crossing
+double stageStableFor = 0;                        // s the ship has held assembled+aligned at the departure staging fix; must exceed STAGE_CONFIRM_SEC before it commits to cruise (assemble-before-flying, not dive-off-the-pad)
 
 // ---- Display views (ship role) ---------------------------------------------
 // Each ship screen shows ONE view, so a 3-screen cockpit can split the display
@@ -355,6 +395,7 @@ const double VEL_DEADBAND = 0.4;          // m/s: velocity-tracking error below 
 // ---- Dock-clearance (anti-collision) tuning --------------------------------
 const double CLEAR_CONE_DOT = 0.70;       // cos(~45 deg): a camera must face this close to the dock direction for its raycast to be trusted (an out-of-cone ray silently reads empty, i.e. falsely "clear")
 const double CLEAR_CONFIRM_SEC = 1.5;     // s the corridor must read clear before a held approach resumes - debounces a ship briefly crossing the corridor so we don't lurch into its path
+const double STAGE_CONFIRM_SEC = 1.5;     // s the ship must hold assembled+aligned at the departure staging fix before it commits to cruise (assemble-before-flying dwell)
 const double CLEAR_RANGE_PAD = 5.0;       // m added to the dock distance when checking the camera has charged enough scan range to reach past the mating plane
 const double CLEAR_LEGACY_MARGIN = 5.0;   // m: pre-0.15 routes store no base grid id, so identity can't be checked - treat only a hit this much closer than the dock point as an obstruction (stay conservative; re-record to enable identity checks)
 
@@ -366,14 +407,17 @@ Program()
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
     phases = new Dictionary<PhaseId, FlightPhase>
     {
-        { PhaseId.Idle,      new IdlePhase() },
-        { PhaseId.Recording, new RecordingPhase() },
-        { PhaseId.Loading,   new LoadingPhase() },
-        { PhaseId.Undock,    new UndockPhase() },
-        { PhaseId.Cruise,    new CruisePhase() },
-        { PhaseId.Approach,  new ApproachPhase() },
-        { PhaseId.Unloading, new UnloadingPhase() },
-        { PhaseId.Faulted,   new FaultedPhase() }
+        { PhaseId.Idle,          new IdlePhase() },
+        { PhaseId.Recording,     new RecordingPhase() },
+        { PhaseId.Loading,       new LoadingPhase() },
+        { PhaseId.Undock,        new UndockPhase() },
+        { PhaseId.DepartStaging, new DepartStagingPhase() },
+        { PhaseId.Cruise,        new CruisePhase() },
+        { PhaseId.Holding,       new HoldingPhase() },
+        { PhaseId.Taxi,          new TaxiPhase() },
+        { PhaseId.Approach,      new ApproachPhase() },
+        { PhaseId.Unloading,     new UnloadingPhase() },
+        { PhaseId.Faulted,       new FaultedPhase() }
     };
     if (string.IsNullOrWhiteSpace(Me.CustomData)) WriteConfigTemplate();
     LoadConfig();
@@ -488,14 +532,17 @@ string LegacyStateName()
 {
     switch (phase)
     {
-        case PhaseId.Loading:   return "Loading";
-        case PhaseId.Undock:    return leg.Outbound ? "UndockHome"   : "UndockDest";
-        case PhaseId.Cruise:    return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
-        case PhaseId.Approach:  return leg.Outbound ? "ApproachDest" : "ApproachHome";
-        case PhaseId.Unloading: return "Unloading";
-        case PhaseId.Recording: return "Recording";
-        case PhaseId.Faulted:   return "Faulted";
-        default:                return "Idle";
+        case PhaseId.Loading:       return "Loading";
+        case PhaseId.Undock:        return leg.Outbound ? "UndockHome"   : "UndockDest";
+        case PhaseId.DepartStaging: return leg.Outbound ? "UndockHome"   : "UndockDest";
+        case PhaseId.Cruise:        return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
+        case PhaseId.Holding:       return leg.Outbound ? "ApproachDest" : "ApproachHome";
+        case PhaseId.Taxi:          return leg.Outbound ? "ApproachDest" : "ApproachHome";
+        case PhaseId.Approach:      return leg.Outbound ? "ApproachDest" : "ApproachHome";
+        case PhaseId.Unloading:     return "Unloading";
+        case PhaseId.Recording:     return "Recording";
+        case PhaseId.Faulted:       return "Faulted";
+        default:                    return "Idle";
     }
 }
 
@@ -509,11 +556,11 @@ void ApplyLegacyState(string name)
         case "Loading":      phase = PhaseId.Loading;   leg.Outbound = true;  break;
         case "UndockHome":   phase = PhaseId.Undock;    leg.Outbound = true;  break;
         case "CruiseToDest": phase = PhaseId.Cruise;    leg.Outbound = true;  break;
-        case "ApproachDest": phase = PhaseId.Approach;  leg.Outbound = true;  break;
+        case "ApproachDest": phase = PhaseId.Holding;   leg.Outbound = true;  break;
         case "Unloading":    phase = PhaseId.Unloading; leg.Outbound = false; break;
         case "UndockDest":   phase = PhaseId.Undock;    leg.Outbound = false; break;
         case "CruiseToHome": phase = PhaseId.Cruise;    leg.Outbound = false; break;
-        case "ApproachHome": phase = PhaseId.Approach;  leg.Outbound = false; break;
+        case "ApproachHome": phase = PhaseId.Holding;   leg.Outbound = false; break;
         case "Recording":    phase = PhaseId.Recording; break;
         case "Faulted":      phase = PhaseId.Faulted;   break;
         default:             phase = PhaseId.Idle;      break;
@@ -910,30 +957,55 @@ void TickUndock()
         return;
     }
 
-    // Two-step powered departure so the cruise autopilot starts already pointed
-    // the right way instead of spinning-and-sliding when it engages:
-    //   1. Back straight out to the stand-off, holding the recorded docked attitude.
-    //   2. Once clear of the dock, rotate in place to face the first cruise waypoint.
-    Vector3D standoff = ApproachPoint(p);
-    bool clear = Vector3D.Distance(rc.GetPosition(), standoff) < 3.0;   // far enough off to rotate safely
+    // Clear the connector ONLY: back straight out to the inner stand-off holding the
+    // recorded docked attitude - no rotation here. The route-heading turn happens later
+    // at the staging fix (DepartStaging), stationary and clear of the structure, so the
+    // ship never pitches while still nose-in on the dock. This split is the departure half
+    // of the anti-dive guarantee: Undock only ever backs off; it never flies the route.
+    bool clear = FlyToPose(ApproachPoint(p), p.Fwd, p.Up, 1.0);
+    phaseTimer += dt;
+    statusMsg = fromHome ? "Clearing home dock" : "Clearing station dock";
 
-    Vector3D faceFwd = p.Fwd;   // hold docked facing until clear of the dock
-    Vector3D faceUp = p.Up;
-    if (clear)
+    if (clear || phaseTimer >= APPROACH_TIMEOUT)
     {
-        Vector3D toTarget = FirstCruiseTarget(fromHome) - standoff;
+        ReleaseControl();
+        phaseTimer = 0;
+        SwitchPhase(PhaseId.DepartStaging);
+    }
+}
+
+// Departure staging fix: fly OUT to the outer stand-off (clear of the structure and
+// traffic), THEN rotate in place to the route heading and hold a short confirm dwell
+// before handing to cruise. Two reasons the turn lives here, not in Undock:
+//   1. Anti-dive: the ship assembles at a legitimate staging point instead of pitching
+//      the moment it unseats from the connector.
+//   2. Seamless handoff: it hands cruise a ship already pointed down the route (matching
+//      the EXACT attitude RunCruiseControl will hold), so cruise engages without the
+//      spin-and-slide it would otherwise do.
+// The confirm dwell (stageStableFor >= STAGE_CONFIRM_SEC) is the local "clearance to
+// depart" gate; a tower grant slots in here later.
+void TickDepartStaging()
+{
+    bool fromHome = leg.Outbound;
+    DockPose p = fromHome ? homePose : destPose;
+    Vector3D staging = HoldPoint(p);
+
+    // Hold the recorded docked attitude until we've reached the staging fix; only then
+    // turn toward the route, so we don't pitch while still close to the structure.
+    bool atFix = Vector3D.Distance(rc.GetPosition(), staging) < 3.0;
+    Vector3D faceFwd = p.Fwd, faceUp = p.Up;
+    if (atFix)
+    {
+        Vector3D toTarget = FirstCruiseTarget(fromHome) - staging;
         if (toTarget.LengthSquared() > 1)
         {
             Vector3D dir = Vector3D.Normalize(toTarget);
             Vector3D grav = rc.GetNaturalGravity();
             if (grav.LengthSquared() > 1e-3 && UseLevelFlight())
             {
-                // Pre-aim the exact attitude level-flight cruise will hold: nose on
-                // the HORIZONTAL heading, up away from gravity. A climbing first
-                // waypoint (dest up-and-over a hill) sits above the stand-off, so
-                // aiming the nose straight at it would pitch up hard - only for cruise
-                // to level off the instant it engages. Matching cruise's attitude here
-                // removes that pitch-up/level-off flip and hands off seamlessly.
+                // Level-flight cruise attitude: nose on the HORIZONTAL heading, up away
+                // from gravity. Matching it here removes the pitch-up/level-off flip a
+                // climbing first waypoint would otherwise cause at cruise engage.
                 Vector3D upWorld = Vector3D.Normalize(-grav);
                 Vector3D horiz = dir - dir.Dot(upWorld) * upWorld;
                 if (horiz.LengthSquared() > 1e-6) faceFwd = Vector3D.Normalize(horiz);
@@ -941,16 +1013,11 @@ void TickUndock()
             }
             else
             {
-                // Nose-forward flight (space, or up-thrust-poor craft): pre-aim the EXACT
-                // attitude cruise will hold (see RunCruiseControl), so the handoff is
-                // seamless and AlignTo has a reachable target. The trap is roll: in space
-                // cruise is roll-agnostic - it holds the ship's CURRENT up - so demanding a
-                // specific roll here is a constraint cruise never wants. A space station's
-                // recorded dock up is essentially arbitrary (no gravity to define it), so
-                // aiming for it made the gyros hunt a roll that never mattered: AlignTo never
-                // fell under ALIGN_TOL and undock swung for the full 45s watchdog before
-                // committing. Match cruise instead - hold current up in space; use gravity-up
-                // (orthogonalised to the heading) for an up-thrust-poor craft still in air.
+                // Nose-forward cruise attitude (space, or up-thrust-poor craft). In space
+                // cruise is roll-agnostic (holds current up), so demand no roll - aiming at
+                // a space station's arbitrary recorded up made the gyros hunt forever. Use
+                // gravity-up orthogonalised to the heading for an up-thrust-poor craft still
+                // in air.
                 faceFwd = dir;
                 if (grav.LengthSquared() > 1e-3)
                 {
@@ -960,18 +1027,21 @@ void TickUndock()
                 }
                 else
                 {
-                    faceUp = rc.WorldMatrix.Up;   // space: cruise coasts on the current up - demand no roll
+                    faceUp = rc.WorldMatrix.Up;
                 }
             }
         }
     }
 
-    bool ready = FlyToPose(standoff, faceFwd, faceUp, 1.0) && clear;
-    phaseTimer += dt;
-    statusMsg = clear ? "Aligning for cruise"
-                      : (fromHome ? "Clearing home dock" : "Clearing station dock");
+    bool posed = FlyToPose(staging, faceFwd, faceUp, 1.0);
+    if (atFix && posed) stageStableFor += dt;   // settled at the fix, aligned to the route
+    else stageStableFor = 0;
 
-    if (ready || phaseTimer >= APPROACH_TIMEOUT)
+    phaseTimer += dt;
+    statusMsg = atFix ? "Staging - aligning for cruise"
+                      : (fromHome ? "Departing home" : "Departing station");
+
+    if (stageStableFor >= STAGE_CONFIRM_SEC || phaseTimer >= APPROACH_TIMEOUT)
     {
         ReleaseControl();
         phaseTimer = 0;
@@ -999,10 +1069,10 @@ void TickCruise()
 
     if (done)
     {
-        // Reached the on-axis stand-off -> hand to the docking controller.
+        // Reached the arrival holding fix -> hand to the holding/clearance controller.
         cruiseArmed = false;
         ReleaseControl();
-        SwitchPhase(PhaseId.Approach);
+        SwitchPhase(PhaseId.Holding);
         phaseTimer = 0;
         return;
     }
@@ -1021,7 +1091,18 @@ bool CruiseArmed(bool toDest) { return cruiseArmed && cruiseArmedToDest == toDes
 
 // The stand-off point sits on the connector's mating axis, approachDist metres
 // clear of the dock. ConnFwd points into the dock, so we back off along -ConnFwd.
+// This is the INNER stand-off - the Taxi start, where the ship commits down the axis.
 Vector3D ApproachPoint(DockPose p) { return p.Pos - p.ConnFwd * approachDist; }
+
+// The OUTER stand-off on the same axis: the departure staging fix / arrival holding
+// fix. Sits holdDist metres off the dock (per-dock override wins), and is always forced
+// clear outside the inner stand-off so the ship never holds on top of the taxi point.
+double EffHoldDist(DockPose p)
+{
+    double d = p.HoldDist > 0 ? p.HoldDist : holdDist;
+    return Math.Max(d, approachDist + 5);
+}
+Vector3D HoldPoint(DockPose p) { return p.Pos - p.ConnFwd * EffHoldDist(p); }
 
 void ArmCruise(bool toDest)
 {
@@ -1044,28 +1125,30 @@ void ArmCruise(bool toDest)
 
 // Build the flight-ordered waypoint list for a leg: the recorded crumbs (forward
 // for the outbound leg, reversed for the return) minus any that sit inside either
-// dock's stand-off radius, then the on-axis stand-off point as the final target.
+// dock's holding-fix radius, then the arrival HOLDING FIX as the final target.
+// Cruise now hands off to Holding at the outer fix, never onto the connector.
 void BuildLeg(bool toDest)
 {
     legWps.Clear();
     DockPose from = toDest ? homePose : destPose;
     DockPose to   = toDest ? destPose : homePose;
-    double skip = approachDist + 3;   // drop crumbs that sit inside either stand-off
+    double skipFrom = EffHoldDist(from) + 3;   // drop crumbs inside either holding fix
+    double skipTo   = EffHoldDist(to) + 3;
 
     if (toDest)
     {
         for (int i = 0; i < path.Count; i++)
-            if (Vector3D.Distance(path[i], from.Pos) > skip && Vector3D.Distance(path[i], to.Pos) > skip)
+            if (Vector3D.Distance(path[i], from.Pos) > skipFrom && Vector3D.Distance(path[i], to.Pos) > skipTo)
                 legWps.Add(path[i]);
     }
     else
     {
         for (int i = path.Count - 1; i >= 0; i--)
-            if (Vector3D.Distance(path[i], from.Pos) > skip && Vector3D.Distance(path[i], to.Pos) > skip)
+            if (Vector3D.Distance(path[i], from.Pos) > skipFrom && Vector3D.Distance(path[i], to.Pos) > skipTo)
                 legWps.Add(path[i]);
     }
 
-    legWps.Add(ApproachPoint(to));   // final target: on-axis stand-off (NOT the dock itself)
+    legWps.Add(HoldPoint(to));   // final target: the arrival holding fix (NOT the connector)
 }
 
 // Precompute a max speed for each leg waypoint (PAM-style velocity profile): slow
@@ -1274,10 +1357,90 @@ bool RunCruiseControl()
     return atEnd && dist < WpArriveRadius() && vmag < ARRIVE_SPEED;
 }
 
-void TickApproach()
+// Arrival holding fix: station-keep at the OUTER stand-off (not the connector) until the
+// corridor is clear and confirmed, then hand to Taxi for the final commit. Two jobs:
+//
+//   * Clearance gate. A craft NEVER flies from cruise straight onto a connector - it waits
+//     here until DockCorridorBlocked reads clear for CLEAR_CONFIRM_SEC (a tower grant will
+//     slot in here later). Taxi is the only phase that touches the connector.
+//   * Gravity-gated reorient. Rotating to the dock attitude swings the ship's strong thrust
+//     axis off anti-gravity, gutting braking authority - dangerous if done while still
+//     descending in gravity. So in gravity we hold a level, belly-down attitude (lift bank
+//     fighting gravity) until the ship has actually stopped (vmag < ARRIVE_SPEED), and only
+//     then rotate to the dock pose. In space there is no braking to lose, so we blend
+//     straight to the dock attitude on arrival. (Cruise already arrives here at < ARRIVE_SPEED,
+//     so the common path reorients immediately; the gate protects the moving edge cases.)
+void TickHolding()
 {
     bool toDest = leg.Outbound;
-    cruiseArmed = false;
+    DockPose p = toDest ? destPose : homePose;
+    Vector3D fix = HoldPoint(p);
+    Vector3D grav = rc.GetNaturalGravity();
+    bool inGrav = grav.LengthSquared() > 1e-3;
+    double vmag = rc.GetShipVelocities().LinearVelocity.Length();
+
+    // Reorient gate (design: "stop only in gravity").
+    Vector3D faceFwd, faceUp;
+    if (inGrav && vmag >= ARRIVE_SPEED)
+    {
+        Vector3D upWorld = Vector3D.Normalize(-grav);
+        Vector3D fwd = rc.WorldMatrix.Forward;
+        Vector3D horiz = fwd - fwd.Dot(upWorld) * upWorld;   // keep current heading, belly down for braking
+        faceFwd = horiz.LengthSquared() > 1e-6 ? Vector3D.Normalize(horiz) : fwd;
+        faceUp = upWorld;
+    }
+    else { faceFwd = p.Fwd; faceUp = p.Up; }   // stopped, or in space: take the dock attitude
+
+    // Anti-collision: hold at the fix while the corridor is fouled. A false positive only
+    // costs time (we hold and auto-resume) - it never faults unless dockBlockSec is set.
+    if (DockCorridorBlocked(p))
+    {
+        dockClearFor = 0;
+        dockBlockTimer += dt;
+        FlyToPose(fix, faceFwd, faceUp, 1.0);
+        statusMsg = (toDest ? "Holding at destination" : "Holding at home")
+                  + " - dock blocked (" + dockBlockTimer.ToString("0") + "s)";
+        if (dockBlockSec > 0 && dockBlockTimer >= dockBlockSec)
+        {
+            ReleaseControl();
+            SwitchPhase(PhaseId.Faulted);
+            statusMsg = "Dock blocked - gave up after " + dockBlockSec.ToString("0") + "s";
+        }
+        return;
+    }
+
+    bool posed = FlyToPose(fix, faceFwd, faceUp, 1.0);
+
+    // Corridor reads clear. After a block, require CLEAR_CONFIRM_SEC of continuous clear
+    // before proceeding, so a ship still crossing doesn't get us moving into its path.
+    if (dockBlockTimer > 0)
+    {
+        dockClearFor += dt;
+        if (dockClearFor < CLEAR_CONFIRM_SEC)
+        {
+            statusMsg = (toDest ? "Dock clearing at destination" : "Dock clearing at home") + " - confirming";
+            return;
+        }
+        dockBlockTimer = 0;   // confirmed clear
+    }
+
+    // Cleared. Commit to Taxi only once settled at the fix in the dock attitude (posed =
+    // arrived, aligned to the dock pose, and stopped) - i.e. reoriented and no longer moving.
+    statusMsg = (toDest ? "Holding at destination" : "Holding at home") + " - cleared";
+    if (posed)
+    {
+        phaseTimer = 0;
+        SwitchPhase(PhaseId.Taxi);
+    }
+}
+
+// Taxi: the cleared final move. Hold the recorded dock attitude and translate straight
+// down the connector axis from the holding fix onto the connector, then connect. If the
+// corridor fouls mid-taxi, abandon the commit and fall back to Holding rather than pressing
+// into it - the clearance gate re-arms and we only re-taxi once clear.
+void TickTaxi()
+{
+    bool toDest = leg.Outbound;
     var c = GetConnector(toDest ? destConn : homeConn);
     DockPose p = toDest ? destPose : homePose;
 
@@ -1295,43 +1458,17 @@ void TickApproach()
 
     if (rc.IsAutoPilotEnabled) AbortAutopilot();
 
-    // Anti-collision: if another grid is parked in (or crossing) the docking corridor,
-    // loiter at the on-axis stand-off instead of flying into it. A false positive only
-    // costs time (we hold and auto-resume) - it never faults unless dockBlockSec is set.
     if (DockCorridorBlocked(p))
     {
-        dockClearFor = 0;
-        dockBlockTimer += dt;
-        FlyToPose(ApproachPoint(p), p.Fwd, p.Up, 0.3);   // hold clear of the dock, on-axis
-        phaseTimer = 0;                                   // don't let the docking timeout fire while we're legitimately waiting
-        statusMsg = (toDest ? "Dock blocked at destination" : "Dock blocked at home")
-                  + " - holding (" + dockBlockTimer.ToString("0") + "s)";
-        if (dockBlockSec > 0 && dockBlockTimer >= dockBlockSec)
-        {
-            AbortAutopilot();
-            ReleaseControl();
-            SwitchPhase(PhaseId.Faulted);
-            statusMsg = "Dock blocked - gave up after " + dockBlockSec.ToString("0") + "s";
-        }
+        dockBlockTimer = 0; dockClearFor = 0;
+        phaseTimer = 0;
+        SwitchPhase(PhaseId.Holding);
+        statusMsg = toDest ? "Taxi aborted - corridor blocked at destination"
+                           : "Taxi aborted - corridor blocked at home";
         return;
     }
-    // Corridor reads clear. After a block, require CLEAR_CONFIRM_SEC of continuous clear
-    // before resuming, so a ship still crossing doesn't get us moving into its path.
-    if (dockBlockTimer > 0)
-    {
-        dockClearFor += dt;
-        if (dockClearFor < CLEAR_CONFIRM_SEC)
-        {
-            FlyToPose(ApproachPoint(p), p.Fwd, p.Up, 0.3);   // keep loitering through the confirm window
-            phaseTimer = 0;
-            statusMsg = (toDest ? "Dock clearing at destination" : "Dock clearing at home") + " - confirming";
-            return;
-        }
-        dockBlockTimer = 0;   // confirmed clear; fall through and resume the approach
-    }
 
-    // Orientation-matched final approach: hold the recorded attitude while
-    // translating straight down the connector axis into the dock.
+    // Cleared: orientation-matched final translation straight down the connector axis.
     FlyToPose(p.Pos, p.Fwd, p.Up, 0.3);
 
     phaseTimer += dt;
@@ -2485,12 +2622,13 @@ string BuildTelem()
 }
 
 // Short, single-word state label for the compact header. The direction-free phase
-// label comes from the phase object; Cruise/Approach append the leg-direction arrow
-// (> outbound to dest, < inbound home) exactly as the old per-state labels did.
+// label comes from the phase object; the directional flight phases append the leg
+// arrow (> outbound to dest, < inbound home) exactly as the old per-state labels did.
 string ShipState()
 {
     string lbl = phases[phase].Label;
-    if (phase == PhaseId.Cruise || phase == PhaseId.Approach)
+    if (phase == PhaseId.DepartStaging || phase == PhaseId.Cruise || phase == PhaseId.Holding
+        || phase == PhaseId.Taxi || phase == PhaseId.Approach)
         return lbl + (leg.Outbound ? " >" : " <");
     return lbl;
 }
@@ -2732,6 +2870,7 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("shuttle", "turnDegrees", turnDegrees);
     ini.Set("shuttle", "simplifyMeters", simplifyMeters);
     ini.Set("shuttle", "approachDist", approachDist);
+    ini.Set("shuttle", "holdDist", holdDist);
     ini.Set("shuttle", "gyroRpmCap", gyroRpmCap);
     ini.Set("shuttle", "brakeFrac", brakeFrac);
     ini.Set("shuttle", "cornerLen", cornerLen);
@@ -2780,6 +2919,7 @@ void LoadConfig()
     turnDegrees = ini.Get("shuttle", "turnDegrees").ToDouble(turnDegrees);
     simplifyMeters = ini.Get("shuttle", "simplifyMeters").ToDouble(simplifyMeters);
     approachDist = ini.Get("shuttle", "approachDist").ToDouble(approachDist);
+    holdDist = Math.Max(approachDist + 5, ini.Get("shuttle", "holdDist").ToDouble(holdDist));
     gyroRpmCap = (float)ini.Get("shuttle", "gyroRpmCap").ToDouble(gyroRpmCap);
     brakeFrac = Clamp(ini.Get("shuttle", "brakeFrac").ToDouble(brakeFrac), 0.1, 1.0);
     cornerLen = Math.Max(1.0, ini.Get("shuttle", "cornerLen").ToDouble(cornerLen));
@@ -2849,6 +2989,9 @@ void WriteRoute(MyIni ini, string name)
     // Static grid each dock belongs to, for the approach clearance raycast (0 = unknown).
     ini.Set(s, "homeBaseId", homePose.BaseGridId);
     ini.Set(s, "destBaseId", destPose.BaseGridId);
+    // Per-dock staging/holding-fix distance override (0 = use the global holdDist).
+    ini.Set(s, "homeHoldDist", homePose.HoldDist);
+    ini.Set(s, "destHoldDist", destPose.HoldDist);
     var sb = new StringBuilder();
     for (int i = 0; i < path.Count; i++) { if (i > 0) sb.Append(';'); sb.Append(Vec(path[i])); }
     ini.Set(s, "path", sb.ToString());
@@ -2885,7 +3028,7 @@ void MigrateLegacyRoute(MyIni ini)
     {
         string[] keys = { "homeConn", "destConn", "homePos", "homeFwd", "homeUp", "homeConnFwd",
                           "destPos", "destFwd", "destUp", "destConnFwd", "homeBaseId", "destBaseId",
-                          "path", "homeDock", "destDock" };
+                          "homeHoldDist", "destHoldDist", "path", "homeDock", "destDock" };
         string dst = RouteSec("Main");
         foreach (var key in keys)
         {
@@ -2922,6 +3065,10 @@ void LoadRouteInto(MyIni ini, string name)
     // Base grid ids for the clearance raycast; absent (0) on pre-0.15 routes -> distance fallback.
     homePose.BaseGridId = ini.Get(s, "homeBaseId").ToInt64(0);
     destPose.BaseGridId = ini.Get(s, "destBaseId").ToInt64(0);
+
+    // Per-dock staging/holding-fix override; absent (0) on pre-0.5 routes -> global holdDist.
+    homePose.HoldDist = ini.Get(s, "homeHoldDist").ToDouble(0);
+    destPose.HoldDist = ini.Get(s, "destHoldDist").ToDouble(0);
 
     path.Clear();
     var raw = ini.Get(s, "path").ToString("");

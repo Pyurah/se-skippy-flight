@@ -4,6 +4,52 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-14
+
+Slice b — **staging, holding & taxi (the anti-dive guarantee).** The ship no longer flies
+straight from undock into a climb, or from cruise straight onto a connector. Every dock is now
+bracketed by an outer stand-off fix: a **departure staging fix** on the way out and an **arrival
+holding fix** on the way in. The only phase that ever moves the ship onto the connector is
+`Taxi`, and it is clearance-gated.
+
+### Added
+- **`DepartStaging` phase.** Undock now only *clears* the connector — it backs straight out to
+  the inner stand-off holding the recorded docked attitude, with no rotation. The route-heading
+  turn moved here: the ship flies out to the outer staging fix (`holdDist`), rotates in place to
+  the exact attitude cruise will hold, and holds a `STAGE_CONFIRM_SEC` confirm dwell before
+  committing to cruise. This is the "assemble before flying" gate — the ship never pitches while
+  still nose-in on the dock, which directly answers the concern that pitching early bleeds the
+  braking authority the strong thrust axis provides in gravity.
+- **`Holding` phase.** Cruise now hands off at the outer holding fix (not the connector). The
+  ship station-keeps there until the docking corridor reads clear for `CLEAR_CONFIRM_SEC`, then
+  commits to `Taxi`. Reorientation to the dock attitude is **gravity-gated** ("stop only in
+  gravity"): in gravity the ship holds a level, belly-down attitude — keeping the lift bank
+  pointed against gravity for braking — until it has actually stopped (`vmag < ARRIVE_SPEED`),
+  and only then rotates to the dock pose; in space it blends straight to the dock attitude on
+  arrival, since there is no braking authority to lose.
+- **`Taxi` phase.** The cleared final move: hold the dock attitude and translate straight down
+  the connector axis from the holding fix onto the connector, then connect. If the corridor
+  fouls mid-taxi, the ship abandons the commit and falls back to `Holding` rather than pressing
+  into it — the clearance gate re-arms and it only re-taxis once clear.
+- **`holdDist` config** (`[shuttle] holdDist`, default 40 m) — the outer stand-off distance,
+  always forced ≥ `approachDist + 5` so the holding fix sits clear outside the taxi start.
+- **Per-dock override** — `homeHoldDist`/`destHoldDist` keys in each `[route.<name>]` section
+  (0 = use the global `holdDist`), for docks where the global stand-off isn't clear of the
+  structure. Round-trips through `WriteRoute`/`LoadRouteInto` and the legacy-route migration.
+
+### Changed
+- `BuildLeg` drops crumbs inside each end's *holding-fix* radius (per-end `EffHoldDist`) and
+  appends the arrival **holding fix** as the final cruise target, replacing the inner approach
+  point. Cruise → `Holding` → `Taxi` → `Dock` replaces the old Cruise → `Approach` → `Dock`.
+- The legacy `Approach` phase now delegates to `TickHolding`, so a mid-flight recompile from an
+  older `[state]` (or an IGC report decoded by a Skippy-Shuttle base board) resumes cleanly on
+  the holding fix. The IGC wire names (`ApproachDest`/`ApproachHome`, `UndockHome`/`UndockDest`)
+  are unchanged — `DepartStaging`, `Holding`, and `Taxi` map onto them for the base board.
+
+### Notes
+- Stripped deploy size: 87,841 chars (12,159 under the 100,000 PB limit; +4,368 vs 0.4.1).
+  Braces balanced (448/448). Version constant bumped to 0.5.0.
+
 ## [0.4.1] - 2026-08-14
 
 ### Fixed

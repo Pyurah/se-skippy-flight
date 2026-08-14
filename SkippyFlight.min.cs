@@ -1,4 +1,4 @@
-const string VERSION = "0.4.1";
+const string VERSION = "0.5.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -9,6 +9,7 @@ struct DockPose
     public Vector3D Up;
     public Vector3D ConnFwd;
     public long BaseGridId;
+    public double HoldDist;
 }
 enum PhaseId
 {
@@ -16,7 +17,10 @@ enum PhaseId
     Recording,
     Loading,
     Undock,
+    DepartStaging,
     Cruise,
+    Holding,
+    Taxi,
     Approach,
     Unloading,
     Faulted
@@ -63,6 +67,14 @@ class UndockPhase : FlightPhase
     public override string Label { get { return "Undock"; } }
     public override void Tick(Program p) { p.TickUndock(); }
 }
+class DepartStagingPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.DepartStaging; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Staging"; } }
+    public override void Enter(Program p) { p.stageStableFor = 0; }
+    public override void Tick(Program p) { p.TickDepartStaging(); }
+}
 class CruisePhase : FlightPhase
 {
     public override PhaseId Id { get { return PhaseId.Cruise; } }
@@ -70,12 +82,28 @@ class CruisePhase : FlightPhase
     public override string Label { get { return "Cruise"; } }
     public override void Tick(Program p) { p.TickCruise(); }
 }
+class HoldingPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Holding; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Holding"; } }
+    public override void Enter(Program p) { p.dockBlockTimer = 0; p.dockClearFor = 0; }
+    public override void Tick(Program p) { p.TickHolding(); }
+}
+class TaxiPhase : FlightPhase
+{
+    public override PhaseId Id { get { return PhaseId.Taxi; } }
+    public override bool IsFlightControl { get { return true; } }
+    public override string Label { get { return "Taxi"; } }
+    public override void Tick(Program p) { p.TickTaxi(); }
+}
 class ApproachPhase : FlightPhase
 {
     public override PhaseId Id { get { return PhaseId.Approach; } }
     public override bool IsFlightControl { get { return true; } }
-    public override string Label { get { return "Docking"; } }
-    public override void Tick(Program p) { p.TickApproach(); }
+    public override string Label { get { return "Holding"; } }
+    public override void Enter(Program p) { p.dockBlockTimer = 0; p.dockClearFor = 0; }
+    public override void Tick(Program p) { p.TickHolding(); }
 }
 class UnloadingPhase : FlightPhase
 {
@@ -115,6 +143,7 @@ double segMeters = 250;
 double turnDegrees = 12;
 double simplifyMeters = 15;
 double approachDist = 15;
+double holdDist = 40;
 float gyroRpmCap = 0f;
 double brakeFrac = 0.6;
 double cornerLen = 30;
@@ -153,6 +182,7 @@ bool cruiseFlyLevel = false;
 bool gyroResting = false;
 double dockBlockTimer = 0;
 double dockClearFor = 0;
+double stageStableFor = 0;
 const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
 int menuPage = PAGE_MAIN;
@@ -204,6 +234,7 @@ const double CRUISE_COAST_BAND = 5.0;
 const double VEL_DEADBAND = 0.4;
 const double CLEAR_CONE_DOT = 0.70;
 const double CLEAR_CONFIRM_SEC = 1.5;
+const double STAGE_CONFIRM_SEC = 1.5;
 const double CLEAR_RANGE_PAD = 5.0;
 const double CLEAR_LEGACY_MARGIN = 5.0;
 Program()
@@ -211,14 +242,17 @@ Program()
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
     phases = new Dictionary<PhaseId, FlightPhase>
     {
-        { PhaseId.Idle,      new IdlePhase() },
-        { PhaseId.Recording, new RecordingPhase() },
-        { PhaseId.Loading,   new LoadingPhase() },
-        { PhaseId.Undock,    new UndockPhase() },
-        { PhaseId.Cruise,    new CruisePhase() },
-        { PhaseId.Approach,  new ApproachPhase() },
-        { PhaseId.Unloading, new UnloadingPhase() },
-        { PhaseId.Faulted,   new FaultedPhase() }
+        { PhaseId.Idle,          new IdlePhase() },
+        { PhaseId.Recording,     new RecordingPhase() },
+        { PhaseId.Loading,       new LoadingPhase() },
+        { PhaseId.Undock,        new UndockPhase() },
+        { PhaseId.DepartStaging, new DepartStagingPhase() },
+        { PhaseId.Cruise,        new CruisePhase() },
+        { PhaseId.Holding,       new HoldingPhase() },
+        { PhaseId.Taxi,          new TaxiPhase() },
+        { PhaseId.Approach,      new ApproachPhase() },
+        { PhaseId.Unloading,     new UnloadingPhase() },
+        { PhaseId.Faulted,       new FaultedPhase() }
     };
     if (string.IsNullOrWhiteSpace(Me.CustomData)) WriteConfigTemplate();
     LoadConfig();
@@ -293,14 +327,17 @@ string LegacyStateName()
 {
     switch (phase)
     {
-        case PhaseId.Loading:   return "Loading";
-        case PhaseId.Undock:    return leg.Outbound ? "UndockHome"   : "UndockDest";
-        case PhaseId.Cruise:    return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
-        case PhaseId.Approach:  return leg.Outbound ? "ApproachDest" : "ApproachHome";
-        case PhaseId.Unloading: return "Unloading";
-        case PhaseId.Recording: return "Recording";
-        case PhaseId.Faulted:   return "Faulted";
-        default:                return "Idle";
+        case PhaseId.Loading:       return "Loading";
+        case PhaseId.Undock:        return leg.Outbound ? "UndockHome"   : "UndockDest";
+        case PhaseId.DepartStaging: return leg.Outbound ? "UndockHome"   : "UndockDest";
+        case PhaseId.Cruise:        return leg.Outbound ? "CruiseToDest" : "CruiseToHome";
+        case PhaseId.Holding:       return leg.Outbound ? "ApproachDest" : "ApproachHome";
+        case PhaseId.Taxi:          return leg.Outbound ? "ApproachDest" : "ApproachHome";
+        case PhaseId.Approach:      return leg.Outbound ? "ApproachDest" : "ApproachHome";
+        case PhaseId.Unloading:     return "Unloading";
+        case PhaseId.Recording:     return "Recording";
+        case PhaseId.Faulted:       return "Faulted";
+        default:                    return "Idle";
     }
 }
 void ApplyLegacyState(string name)
@@ -310,11 +347,11 @@ void ApplyLegacyState(string name)
         case "Loading":      phase = PhaseId.Loading;   leg.Outbound = true;  break;
         case "UndockHome":   phase = PhaseId.Undock;    leg.Outbound = true;  break;
         case "CruiseToDest": phase = PhaseId.Cruise;    leg.Outbound = true;  break;
-        case "ApproachDest": phase = PhaseId.Approach;  leg.Outbound = true;  break;
+        case "ApproachDest": phase = PhaseId.Holding;   leg.Outbound = true;  break;
         case "Unloading":    phase = PhaseId.Unloading; leg.Outbound = false; break;
         case "UndockDest":   phase = PhaseId.Undock;    leg.Outbound = false; break;
         case "CruiseToHome": phase = PhaseId.Cruise;    leg.Outbound = false; break;
-        case "ApproachHome": phase = PhaseId.Approach;  leg.Outbound = false; break;
+        case "ApproachHome": phase = PhaseId.Holding;   leg.Outbound = false; break;
         case "Recording":    phase = PhaseId.Recording; break;
         case "Faulted":      phase = PhaseId.Faulted;   break;
         default:             phase = PhaseId.Idle;      break;
@@ -625,13 +662,26 @@ void TickUndock()
         statusMsg = "Undocking";
         return;
     }
-    Vector3D standoff = ApproachPoint(p);
-    bool clear = Vector3D.Distance(rc.GetPosition(), standoff) < 3.0;
-    Vector3D faceFwd = p.Fwd;
-    Vector3D faceUp = p.Up;
-    if (clear)
+    bool clear = FlyToPose(ApproachPoint(p), p.Fwd, p.Up, 1.0);
+    phaseTimer += dt;
+    statusMsg = fromHome ? "Clearing home dock" : "Clearing station dock";
+    if (clear || phaseTimer >= APPROACH_TIMEOUT)
     {
-        Vector3D toTarget = FirstCruiseTarget(fromHome) - standoff;
+        ReleaseControl();
+        phaseTimer = 0;
+        SwitchPhase(PhaseId.DepartStaging);
+    }
+}
+void TickDepartStaging()
+{
+    bool fromHome = leg.Outbound;
+    DockPose p = fromHome ? homePose : destPose;
+    Vector3D staging = HoldPoint(p);
+    bool atFix = Vector3D.Distance(rc.GetPosition(), staging) < 3.0;
+    Vector3D faceFwd = p.Fwd, faceUp = p.Up;
+    if (atFix)
+    {
+        Vector3D toTarget = FirstCruiseTarget(fromHome) - staging;
         if (toTarget.LengthSquared() > 1)
         {
             Vector3D dir = Vector3D.Normalize(toTarget);
@@ -659,11 +709,13 @@ void TickUndock()
             }
         }
     }
-    bool ready = FlyToPose(standoff, faceFwd, faceUp, 1.0) && clear;
+    bool posed = FlyToPose(staging, faceFwd, faceUp, 1.0);
+    if (atFix && posed) stageStableFor += dt;
+    else stageStableFor = 0;
     phaseTimer += dt;
-    statusMsg = clear ? "Aligning for cruise"
-                      : (fromHome ? "Clearing home dock" : "Clearing station dock");
-    if (ready || phaseTimer >= APPROACH_TIMEOUT)
+    statusMsg = atFix ? "Staging - aligning for cruise"
+                      : (fromHome ? "Departing home" : "Departing station");
+    if (stageStableFor >= STAGE_CONFIRM_SEC || phaseTimer >= APPROACH_TIMEOUT)
     {
         ReleaseControl();
         phaseTimer = 0;
@@ -686,7 +738,7 @@ void TickCruise()
     {
         cruiseArmed = false;
         ReleaseControl();
-        SwitchPhase(PhaseId.Approach);
+        SwitchPhase(PhaseId.Holding);
         phaseTimer = 0;
         return;
     }
@@ -702,6 +754,12 @@ bool cruiseArmedToDest = false;
 bool cruiseArmed = false;
 bool CruiseArmed(bool toDest) { return cruiseArmed && cruiseArmedToDest == toDest; }
 Vector3D ApproachPoint(DockPose p) { return p.Pos - p.ConnFwd * approachDist; }
+double EffHoldDist(DockPose p)
+{
+    double d = p.HoldDist > 0 ? p.HoldDist : holdDist;
+    return Math.Max(d, approachDist + 5);
+}
+Vector3D HoldPoint(DockPose p) { return p.Pos - p.ConnFwd * EffHoldDist(p); }
 void ArmCruise(bool toDest)
 {
     BuildLeg(toDest);
@@ -725,20 +783,21 @@ void BuildLeg(bool toDest)
     legWps.Clear();
     DockPose from = toDest ? homePose : destPose;
     DockPose to   = toDest ? destPose : homePose;
-    double skip = approachDist + 3;
+    double skipFrom = EffHoldDist(from) + 3;
+    double skipTo   = EffHoldDist(to) + 3;
     if (toDest)
     {
         for (int i = 0; i < path.Count; i++)
-            if (Vector3D.Distance(path[i], from.Pos) > skip && Vector3D.Distance(path[i], to.Pos) > skip)
+            if (Vector3D.Distance(path[i], from.Pos) > skipFrom && Vector3D.Distance(path[i], to.Pos) > skipTo)
                 legWps.Add(path[i]);
     }
     else
     {
         for (int i = path.Count - 1; i >= 0; i--)
-            if (Vector3D.Distance(path[i], from.Pos) > skip && Vector3D.Distance(path[i], to.Pos) > skip)
+            if (Vector3D.Distance(path[i], from.Pos) > skipFrom && Vector3D.Distance(path[i], to.Pos) > skipTo)
                 legWps.Add(path[i]);
     }
-    legWps.Add(ApproachPoint(to));
+    legWps.Add(HoldPoint(to));
 }
 void BuildVelocityProfile()
 {
@@ -856,10 +915,60 @@ bool RunCruiseControl()
     bool atEnd = cruiseIdx == legWps.Count - 1;
     return atEnd && dist < WpArriveRadius() && vmag < ARRIVE_SPEED;
 }
-void TickApproach()
+void TickHolding()
 {
     bool toDest = leg.Outbound;
-    cruiseArmed = false;
+    DockPose p = toDest ? destPose : homePose;
+    Vector3D fix = HoldPoint(p);
+    Vector3D grav = rc.GetNaturalGravity();
+    bool inGrav = grav.LengthSquared() > 1e-3;
+    double vmag = rc.GetShipVelocities().LinearVelocity.Length();
+    Vector3D faceFwd, faceUp;
+    if (inGrav && vmag >= ARRIVE_SPEED)
+    {
+        Vector3D upWorld = Vector3D.Normalize(-grav);
+        Vector3D fwd = rc.WorldMatrix.Forward;
+        Vector3D horiz = fwd - fwd.Dot(upWorld) * upWorld;
+        faceFwd = horiz.LengthSquared() > 1e-6 ? Vector3D.Normalize(horiz) : fwd;
+        faceUp = upWorld;
+    }
+    else { faceFwd = p.Fwd; faceUp = p.Up; }
+    if (DockCorridorBlocked(p))
+    {
+        dockClearFor = 0;
+        dockBlockTimer += dt;
+        FlyToPose(fix, faceFwd, faceUp, 1.0);
+        statusMsg = (toDest ? "Holding at destination" : "Holding at home")
+                  + " - dock blocked (" + dockBlockTimer.ToString("0") + "s)";
+        if (dockBlockSec > 0 && dockBlockTimer >= dockBlockSec)
+        {
+            ReleaseControl();
+            SwitchPhase(PhaseId.Faulted);
+            statusMsg = "Dock blocked - gave up after " + dockBlockSec.ToString("0") + "s";
+        }
+        return;
+    }
+    bool posed = FlyToPose(fix, faceFwd, faceUp, 1.0);
+    if (dockBlockTimer > 0)
+    {
+        dockClearFor += dt;
+        if (dockClearFor < CLEAR_CONFIRM_SEC)
+        {
+            statusMsg = (toDest ? "Dock clearing at destination" : "Dock clearing at home") + " - confirming";
+            return;
+        }
+        dockBlockTimer = 0;
+    }
+    statusMsg = (toDest ? "Holding at destination" : "Holding at home") + " - cleared";
+    if (posed)
+    {
+        phaseTimer = 0;
+        SwitchPhase(PhaseId.Taxi);
+    }
+}
+void TickTaxi()
+{
+    bool toDest = leg.Outbound;
     var c = GetConnector(toDest ? destConn : homeConn);
     DockPose p = toDest ? destPose : homePose;
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
@@ -876,32 +985,12 @@ void TickApproach()
     if (rc.IsAutoPilotEnabled) AbortAutopilot();
     if (DockCorridorBlocked(p))
     {
-        dockClearFor = 0;
-        dockBlockTimer += dt;
-        FlyToPose(ApproachPoint(p), p.Fwd, p.Up, 0.3);
+        dockBlockTimer = 0; dockClearFor = 0;
         phaseTimer = 0;
-        statusMsg = (toDest ? "Dock blocked at destination" : "Dock blocked at home")
-                  + " - holding (" + dockBlockTimer.ToString("0") + "s)";
-        if (dockBlockSec > 0 && dockBlockTimer >= dockBlockSec)
-        {
-            AbortAutopilot();
-            ReleaseControl();
-            SwitchPhase(PhaseId.Faulted);
-            statusMsg = "Dock blocked - gave up after " + dockBlockSec.ToString("0") + "s";
-        }
+        SwitchPhase(PhaseId.Holding);
+        statusMsg = toDest ? "Taxi aborted - corridor blocked at destination"
+                           : "Taxi aborted - corridor blocked at home";
         return;
-    }
-    if (dockBlockTimer > 0)
-    {
-        dockClearFor += dt;
-        if (dockClearFor < CLEAR_CONFIRM_SEC)
-        {
-            FlyToPose(ApproachPoint(p), p.Fwd, p.Up, 0.3);
-            phaseTimer = 0;
-            statusMsg = (toDest ? "Dock clearing at destination" : "Dock clearing at home") + " - confirming";
-            return;
-        }
-        dockBlockTimer = 0;
     }
     FlyToPose(p.Pos, p.Fwd, p.Up, 0.3);
     phaseTimer += dt;
@@ -1737,7 +1826,8 @@ string BuildTelem()
 string ShipState()
 {
     string lbl = phases[phase].Label;
-    if (phase == PhaseId.Cruise || phase == PhaseId.Approach)
+    if (phase == PhaseId.DepartStaging || phase == PhaseId.Cruise || phase == PhaseId.Holding
+        || phase == PhaseId.Taxi || phase == PhaseId.Approach)
         return lbl + (leg.Outbound ? " >" : " <");
     return lbl;
 }
@@ -1933,6 +2023,7 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("shuttle", "turnDegrees", turnDegrees);
     ini.Set("shuttle", "simplifyMeters", simplifyMeters);
     ini.Set("shuttle", "approachDist", approachDist);
+    ini.Set("shuttle", "holdDist", holdDist);
     ini.Set("shuttle", "gyroRpmCap", gyroRpmCap);
     ini.Set("shuttle", "brakeFrac", brakeFrac);
     ini.Set("shuttle", "cornerLen", cornerLen);
@@ -1974,6 +2065,7 @@ void LoadConfig()
     turnDegrees = ini.Get("shuttle", "turnDegrees").ToDouble(turnDegrees);
     simplifyMeters = ini.Get("shuttle", "simplifyMeters").ToDouble(simplifyMeters);
     approachDist = ini.Get("shuttle", "approachDist").ToDouble(approachDist);
+    holdDist = Math.Max(approachDist + 5, ini.Get("shuttle", "holdDist").ToDouble(holdDist));
     gyroRpmCap = (float)ini.Get("shuttle", "gyroRpmCap").ToDouble(gyroRpmCap);
     brakeFrac = Clamp(ini.Get("shuttle", "brakeFrac").ToDouble(brakeFrac), 0.1, 1.0);
     cornerLen = Math.Max(1.0, ini.Get("shuttle", "cornerLen").ToDouble(cornerLen));
@@ -2030,6 +2122,8 @@ void WriteRoute(MyIni ini, string name)
     ini.Set(s, "destConnFwd", Vec(destPose.ConnFwd));
     ini.Set(s, "homeBaseId", homePose.BaseGridId);
     ini.Set(s, "destBaseId", destPose.BaseGridId);
+    ini.Set(s, "homeHoldDist", homePose.HoldDist);
+    ini.Set(s, "destHoldDist", destPose.HoldDist);
     var sb = new StringBuilder();
     for (int i = 0; i < path.Count; i++) { if (i > 0) sb.Append(';'); sb.Append(Vec(path[i])); }
     ini.Set(s, "path", sb.ToString());
@@ -2058,7 +2152,7 @@ void MigrateLegacyRoute(MyIni ini)
     {
         string[] keys = { "homeConn", "destConn", "homePos", "homeFwd", "homeUp", "homeConnFwd",
                           "destPos", "destFwd", "destUp", "destConnFwd", "homeBaseId", "destBaseId",
-                          "path", "homeDock", "destDock" };
+                          "homeHoldDist", "destHoldDist", "path", "homeDock", "destDock" };
         string dst = RouteSec("Main");
         foreach (var key in keys)
         {
@@ -2086,6 +2180,8 @@ void LoadRouteInto(MyIni ini, string name)
                  & TryVec(ini.Get(s, "destConnFwd").ToString(""), out destPose.ConnFwd);
     homePose.BaseGridId = ini.Get(s, "homeBaseId").ToInt64(0);
     destPose.BaseGridId = ini.Get(s, "destBaseId").ToInt64(0);
+    homePose.HoldDist = ini.Get(s, "homeHoldDist").ToDouble(0);
+    destPose.HoldDist = ini.Get(s, "destHoldDist").ToDouble(0);
     path.Clear();
     var raw = ini.Get(s, "path").ToString("");
     if (!string.IsNullOrEmpty(raw))
