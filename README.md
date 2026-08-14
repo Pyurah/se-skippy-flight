@@ -1,24 +1,24 @@
 # SkippyFlight
 
-> **Successor to [Skippy-Shuttle](../Skippy-Shuttle/).** SkippyFlight is a phase-based rewrite of
-> the shuttle controller (phase-object architecture, staging/holding/taxi, scenario auto-detection,
-> a separate control tower). It currently ships as a faithful copy of Skippy-Shuttle v0.15.0 while
-> the phase model is built out slice by slice — see [roadmap.md](roadmap.md). Skippy-Shuttle stays
-> frozen and in active use; the two interoperate over the same IGC protocol.
+An autonomous two-connector **delivery shuttle** script for Space Engineers: a ship that ferries
+cargo between two docking points — for example, a planet base and an orbital station — flying the
+whole route itself, from undock to dock.
 
-An autonomous two-connector **delivery shuttle** script for Space Engineers, built as a
-purpose-made replacement for PAM when all you need is a ship that ferries cargo between
-two docking points (for example, a planet base and an orbital station).
+SkippyFlight is built on a **phase-object flight model** (undock → staging → cruise → holding →
+taxi → dock). It assembles at a staging fix clear of the structure before flying and holds at an
+arrival fix before docking, so it never dives straight onto a connector. Scenario auto-detection
+(climb/descent for planet↔space routes) and a separate control tower for traffic management are
+being built out slice by slice — see [roadmap.md](roadmap.md).
 
 - **One file, two roles.** Paste the same script into the ship PB *and* the base PB. The
   role is chosen in Custom Data (`role = shuttle` or `role = base`).
-- **PAM-style route teaching.** Dock, `RECORD HOME`, fly the route by hand, dock, `RECORD DEST`.
+- **Teach a route by flying it.** Dock, `RECORD HOME`, fly the route by hand, dock, `RECORD DEST`.
   The route is saved as copy-pasteable text so you can share it across a fleet.
 - **Orientation-matched, ship-agnostic docking.** Recording captures the full docked pose —
   position, facing, and the connector's mating axis — so the shuttle reproduces the exact
   attitude it was recorded in. Works for connectors facing **any** direction (nose, top,
   bottom, side), on any ship with gyros and thrusters.
-- **Custom PAM-style flight.** A single gyro + thruster controller flies the whole route —
+- **Custom flight controller.** A single gyro + thruster controller flies the whole route —
   undock, cruise, and dock — on a precomputed velocity profile with a √(2·a·d) braking curve.
   It turns to face each waypoint, accelerates on straights, slows through corners, and eases
   into the dock. No stock autopilot, so no weaving or circling between waypoints. While flying
@@ -41,10 +41,10 @@ two docking points (for example, a planet base and an orbital station).
 3. Repeat for the base/station PB, but set `role = base`.
 
 > **Paste the `.min.cs`, not the `.cs`.** The fully commented source
-> [`SkippyFlight.cs`](SkippyFlight.cs) is **129,602 chars** — over the 100,000-char PB limit —
+> [`SkippyFlight.cs`](SkippyFlight.cs) is **154,508 chars** — over the 100,000-char PB limit —
 > so it won't compile in-game as-is. `python tools/build-min.py` generates
 > [`SkippyFlight.min.cs`](SkippyFlight.min.cs): the same code with comments and blank lines
-> stripped (~42 % smaller → **75,112 chars**, ~24.9 k under the cap). Keep editing
+> stripped (~42 % smaller → **88,835 chars**, ~11.2 k under the cap). Keep editing
 > `SkippyFlight.cs`; the min file is a generated artifact, rebuilt on every change. (In-game
 > compile errors then report line numbers against the min file, not the source.)
 
@@ -74,7 +74,8 @@ two docking points (for example, a planet base and an orbital station).
 | `segMeters` | `250` | Breadcrumb spacing on straight runs |
 | `turnDegrees` | `12` | Extra breadcrumb when heading turns this much |
 | `simplifyMeters` | `15` | How far the recorded path may bow from a straight chord before a waypoint is kept. Straight runs collapse to their endpoints, so the 250-waypoint budget goes to turns. `0` = off (dense recording) |
-| `approachDist` | `15` | On-axis stand-off (m) where cruise hands off to the docking controller |
+| `approachDist` | `15` | **Inner** on-axis stand-off (m) — the taxi start point, where the ship commits down the connector axis onto the dock |
+| `holdDist` | `40` | **Outer** on-axis stand-off (m) — the departure **staging** fix and arrival **holding** fix, where the ship assembles clear of the structure before flying and holds before docking. Forced ≥ `approachDist` + 5. Per-dock override via `homeHoldDist` / `destHoldDist` keys in the `[route]` section |
 | `gyroRpmCap` | `0` | Gyro rate cap (RPM) for gentle rotation. `0` = auto (15 small grid / 5 large) |
 | `brakeFrac` | `0.6` | Fraction of the weakest thrust axis used for braking/cornering (headroom for gravity + saturation). Lower = brakes earlier/gentler. Clamped 0.1–1.0 |
 | `cornerLen` | `30` | Corner-rounding length (m); also the look-ahead blend distance into turns. Larger = wider, faster corners |
@@ -225,7 +226,7 @@ for a `DEPART` at home each time.
 **Departure triggers (`homeTrigger` / `destTrigger`, per end):**
 
 - **Auto** *(default)* — leave as soon as the cargo op finishes (loaded at home / emptied at the
-  destination, keeping the unload drain-timeout safety net). This is the pre-0.9.0 behaviour.
+  destination, keeping the unload drain-timeout safety net).
 - **Cargo** — wait until the hold is genuinely full at home (`departFill`% / mass gate) or empty
   at the destination before leaving. This is what the old `WAITFULL` mode did.
 - **Timer** — run the sorters for `dwellSec`, then depart regardless of fill.
@@ -262,9 +263,9 @@ that's holding at a dock, and `DEPART <shipName>` targets just one. So a station
 waiting shuttle on its way without anyone touching the ship — provided the two are in antenna
 range of each other (see the range note above).
 
-> Antenna range is 50 km; your run is 78 km. Place one relay antenna near the midpoint if
-> you want an unbroken board — the shuttle still flies fine without signal; only the board
-> blanks while out of range.
+> If your route is longer than the antenna's broadcast range, the board blanks to **NO SIGNAL**
+> while the shuttle is out of range. Place a relay antenna near the midpoint for an unbroken
+> board — the shuttle still flies fine without signal; only the board blanks while out of range.
 
 ## Limitations (honest)
 
@@ -285,9 +286,9 @@ range of each other (see the range note above).
   cameras untagged and the shuttle picks whichever faces the dock). With no camera that can see the
   corridor it degrades gracefully — it simply docks as before (no false holds). A blocked corridor
   **waits forever by default** (`dockBlockSec = 0`); set `dockBlockSec` to fault after N seconds if
-  you'd rather it give up. **Re-record routes taught before v0.15.0** to store the base grid id —
-  older routes fall back to a coarser distance rule. Disable the whole check with
-  `dockClearCheck = false`.
+  you'd rather it give up. An **imported route that predates base-grid-id capture** falls back to a
+  coarser distance rule — re-record it to enable the identity-aware check. Disable the whole check
+  with `dockClearCheck = false`.
 - Control gains are tuned conservatively but every ship is different. The attitude gains
   `gyroGain` (turn snappiness) and `gyroDamp` (wobble damping) are **live-tunable in Custom
   Data**. The flight controller now runs at 60 Hz while flying, so the heading holds steady and
@@ -305,8 +306,9 @@ range of each other (see the range note above).
   manual control mid-flight, re-enable dampeners yourself (the ship's Z / dampener toggle).
 - The controller obeys the world's speed cap (100 m/s by default). Setting `cruiseSpeed` above
   the world cap won't make the ship go faster — the game clamps it.
-- Routes recorded by v0.1–0.2 stored position only; they still load, with orientation
-  synthesised as a nose-first approach. Re-record them to capture true orientation.
+- An **imported route that stored position only** (from a version predating orientation capture)
+  still loads, with orientation synthesised as a nose-first approach. Re-record it to capture the
+  true docked orientation.
 - The **fuel/battery departure gate learns by flying.** Its per-leg estimate is measured from the
   last completed leg in each direction, so the *first* departure after a fresh compile (or after
   re-recording the route) is gated only by the `minHydrogenPct` / `minBatteryPct` floors — set

@@ -168,11 +168,53 @@ only when Climb/Cruise/Descent split.
 ## Traffic control / holding (separate tower)
 
 The control tower is a **separate `SkippyTower.cs`** (own char budget). The staging/holding/taxi
-phases are the seam it plugs into. Clearance source is pluggable: local corridor check now, tower
-grant later. `Taxi` is the gated commit — a craft only leaves `Holding` for `Taxi` (the sole phase
-that touches the connector) once cleared. Wire protocol is additive (superset): existing
-`name|state|eta|dist|fill|mass|running` report unchanged; add `REQ|pad`, `HOLD`, `CLEAR|pad|pose`.
-Old shuttles ignore the new messages and degrade gracefully.
+phases and the two departure gates (`DepartureAllowed` + `DepartFuelOk`) are the seams it plugs
+into. `Taxi` is the gated commit — a craft only leaves `Holding` for `Taxi` (the sole phase that
+touches the connector) once cleared; departure is the mirror — the ship only leaves `Loading`/
+`Unloading` for `Undock` once cleared.
+
+### The overlay model (the guiding rule)
+
+The tower is **an additional AND-gate layered on top of the local gates, not a replacement for
+them, and not a `DepartTrigger` value.** A trigger enum value would be *exclusive* (you couldn't
+have "cargo-full **and** tower-cleared"); the requirement is that the ship first satisfies its own
+local gate, **then** waits on the tower. Formally, for either the departure commit or the
+arrival→taxi commit:
+
+```
+proceed when:  local gate satisfied            (trigger + fuel for departure; corridor clear + dwell for arrival)
+          AND ( NOT towerActive  OR  cleared )   (tower overlay)
+```
+
+- **`towerActive`** is driven by a **tower heartbeat**, not mere presence. A tower that is powered
+  but not controlling this channel simply doesn't emit the heartbeat, so ships stay independent —
+  which is exactly "present AND *actively controlling*." If the heartbeat goes stale
+  (`TOWER_TIMEOUT`), the ship **reverts to independent** and proceeds on the local gate alone — the
+  anti-stranding guarantee (a destroyed/unpowered tower never strands the fleet).
+- **`cleared`** is set only by an addressed grant from the tower for the pending action.
+- A per-connector setting **`useTower` (Auto / Off)** opts in. `Auto` (default) respects a live
+  tower and falls back to independent when none is heard; `Off` ignores the tower entirely (pure
+  local behavior — the regression-safe path). A ship on a channel with no tower behaves exactly as
+  it does today.
+
+### Wire protocol (additive; all command messages `CMD|`-tagged)
+
+The existing status report (`name|state|eta|dist|fill|mass|running`, broadcast ~6 Hz) is
+**unchanged** — the tower already receives it as the base role, so it knows every ship's phase,
+distance and dock without extra telemetry. New messages, all prefixed `CMD|` so pre-Slice-e
+shuttles skip them in `DrainIgc` and degrade gracefully:
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `CMD\|TOWER\|<zone>` | tower → all | Heartbeat / "actively controlling this channel." Periodic; resets each ship's `towerAge`. |
+| `CMD\|REQ\|<ship>\|<DEPART\|LAND>\|<dock>` | ship → tower | Clearance request; ship's local gate is green and it wants to move. Re-sent on an interval while holding. |
+| `CMD\|CLEAR\|<ship>\|<DEPART\|LAND>[\|<pose>]` | tower → ship | Grant. Optional `pose` reserved for shared-bank pad assignment (Slice e stretch / f). |
+| `CMD\|HOLD\|<ship>\|<DEPART\|LAND>[\|<reason>]` | tower → ship | Deny/keep holding; optional reason surfaces on the status line. |
+| `CMD\|DEPART\|<who>` | tower/operator → ship | **Existing, unchanged.** A *force* override that bypasses both the local trigger and the tower gate (manual/emergency dispatch). |
+
+Clearance is **one-shot and ephemeral** — consumed when the ship undocks/taxis, and **not
+persisted** (a recompile mid-hold simply re-`REQ`s; the tower re-grants). It clears on STOP/START
+like `departRequested`.
 
 ---
 
@@ -189,8 +231,9 @@ Baseline (v0.1.0, unmodified copy): stripped **70,780 chars**, **29,220** headro
 After Slice a (v0.2.0, phase objects): stripped **75,112 chars**, **24,888** headroom (+4,332).
 After Slice b (v0.5.0, staging/holding/taxi): stripped **87,841 chars**, **12,159** headroom
 (+4,368 vs 0.4.1; the intervening named-routes and telemetry extras account for the rest).
-After the v0.5.1 DepartStaging fix: stripped **88,862 chars**, **11,138** headroom (+1,021;
-the `stagingAtFix` latch, coast-hold staging turn, and `StationKeep` helper).
+After the v0.5.1 DepartStaging fix: stripped **88,835 chars**, **11,165** headroom (+1,000 vs
+0.5.0; the `stagingAtFix` latch, coast-hold staging turn, and `StationKeep` helper, less the
+duplicate-ETA removal).
 
 ---
 
@@ -246,14 +289,61 @@ Capture `homeG`/`destG` at record; add `Classify`; lift the phase sequence into 
 Add altitude reader (`rc.TryGetPlanetElevation`); trigger Climb→Cruise→Descent boundaries and the
 handoff danger-zone status from gravity+altitude.
 
-### Slice e — tower clearance
+### Slice e — tower clearance (shuttle side)
 
-Swap the local clearance gate in `DepartStaging`/`Holding`/`Taxi` for additive IGC clearance
-(`REQ`/`HOLD`/`CLEAR`); build the shared-bank pad assignment.
+Layer the tower overlay (see **Traffic control / holding** above) onto the two existing commit
+points, keeping the local gates intact and independent operation as the fallback. This slice is
+**shuttle-side only** — it teaches the ship to speak the handshake and obey a live tower; the
+tower that answers is Slice f. Until Slice f exists, `useTower=Auto` with no tower on the channel
+is a no-op, so this slice ships without regression.
+
+**Design decisions (locked):**
+- Tower is an **overlay AND-gate**, not a `DepartTrigger` value — it composes with cargo/timer/
+  manual rather than replacing them.
+- **Heartbeat-driven** `towerActive`, with staleness → independent (anti-stranding). "Present" is
+  not enough; the tower must be actively broadcasting `CMD|TOWER`.
+- Clearance gates **both** ends: departure (`Loading`/`Unloading` → `Undock`) and arrival
+  (`Holding` → `Taxi`) — "traffic to *and* from the station."
+- Clearance is **ephemeral and unpersisted**; the existing `CMD|DEPART` force override still
+  bypasses everything.
+
+**Ship-side additions:**
+- [ ] Config `useTower` (Auto/Off), persisted in `[shuttle]` and per-`[route.<name>]` override;
+      new row on the Depart settings page (`PAGE_DEPART` 7 → 8 items).
+- [ ] State: `towerAge` (since last heartbeat), `towerActive = useTower==Auto && towerAge <
+      TOWER_TIMEOUT`; per-pending-action `clearanceRequested` / `cleared` / `holdReason`; consts
+      `TOWER_TIMEOUT`, `REQ_RESEND`.
+- [ ] `DrainIgc` extended to parse `TOWER` (reset `towerAge`), `CLEAR` (set `cleared` for the
+      addressed action), `HOLD` (keep holding + capture reason). `DEPART` force path unchanged.
+- [ ] Helper `bool ClearedToProceed(string action, string dock)` — returns `!towerActive ||
+      cleared`; while blocked, (re)sends `CMD|REQ` on the `REQ_RESEND` interval and sets the status
+      line. Called as the final AND after `DepartureAllowed && DepartFuelOk` in `TickLoading`/
+      `TickUnloading`, and after the corridor-clear + confirm dwell in the `Holding`→`Taxi` commit.
+- [ ] Status surfacing: `Holding - awaiting tower (DEPART)`, the tower's `HOLD` reason when given,
+      and `Tower: independent (no signal)` after a timeout revert. Telemetry view shows
+      `Tower age`/`active`.
+- [ ] Edge cases proven in-world: tower dies mid-hold → reverts to independent after
+      `TOWER_TIMEOUT`; recompile mid-hold → re-`REQ`s and re-grants (no persisted clearance);
+      operator `DEPART` during a tower hold → override wins; `useTower=Off` → byte-for-byte
+      current behavior.
+- [ ] Rebuild + budget check (`python tools/build-min.py`); record stripped size (est. modest —
+      one setting, one gate helper, ~4 message cases, status strings; current headroom 11,138).
 
 ### Slice f — SkippyTower.cs
 
-The control tower (pad registry, clearance grants, slot scheduling) as its own script.
+The control tower as its own script (own char budget), speaking the Slice-e protocol. Extends the
+existing passive base/board role into an active-control mode:
+
+- Emits the `CMD|TOWER|<zone>` heartbeat on an interval — the presence signal that flips ships from
+  independent to controlled.
+- Consumes the existing status reports (it already builds the `fleet` table) plus incoming
+  `CMD|REQ`; **serializes grants** so only one craft occupies the corridor/pad at a time, issuing
+  `CMD|CLEAR` / `CMD|HOLD` with an optional reason. Ship side is oblivious — it just waits for its
+  addressed grant.
+- Pad registry + slot scheduling for a shared bank; optional `pose` in `CMD|CLEAR` assigns a
+  dynamic pad (pairs with the "Tower-assigned fixes" note under *Staging & holding fixes*).
+- A control-mode toggle so the same block can run as a plain status board (no heartbeat → fleet
+  stays independent) or an active controller.
 
 ### Later
 
