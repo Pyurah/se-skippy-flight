@@ -41,14 +41,14 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 3. Repeat for the base/station PB, but set `role = base`.
 
 > **Paste the `.min.cs`, not the `.cs`.** The fully commented source
-> [`SkippyFlight.cs`](SkippyFlight.cs) is **154,508 chars** — over the 100,000-char PB limit —
+> [`SkippyFlight.cs`](SkippyFlight.cs) is **154,979 chars** — over the 100,000-char PB limit —
 > so it won't compile in-game as-is. `python tools/build-min.py` generates
 > [`SkippyFlight.min.cs`](SkippyFlight.min.cs): the same code with comments and blank lines
-> stripped (~42 % smaller → **88,835 chars**, ~11.2 k under the cap). Keep editing
+> stripped (~43 % smaller → **89,034 chars**, ~11 k under the cap). Keep editing
 > `SkippyFlight.cs`; the min file is a generated artifact, rebuilt on every change. (In-game
 > compile errors then report line numbers against the min file, not the source.)
 
-## Custom Data (`[shuttle]` section)
+## Custom Data (`[sf]` section)
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -63,9 +63,9 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 | `minBatteryPct` | `10` | Hard floor — never depart below this battery charge %. Ignored if the ship has no batteries |
 | `fuelMarginPct` | `25` | Safety margin on the measured per-leg fuel/charge estimate |
 | `remoteName` | *(blank)* | Blank = auto-find a Remote Control on the grid |
-| `loadTag` | `[SHUTTLE:LOAD]` | Sorters whose name **contains** this tag load cargo at home |
-| `unloadTag` | `[SHUTTLE:UNLOAD]` | Sorters whose name **contains** this tag unload at the destination |
-| `lcdTag` | `[SHUTTLE]` | LCDs whose name contains this tag show status |
+| `loadTag` | `[SF:LOAD]` | Sorters whose name **contains** this tag load cargo at home |
+| `unloadTag` | `[SF:UNLOAD]` | Sorters whose name **contains** this tag unload at the destination |
+| `lcdTag` | `[SF]` | LCDs whose name contains this tag show status |
 | `cruiseSpeed` | `100` | Cruise speed cap (m/s); the controller stays at or below this |
 | `dockSpeed` | `5` | Final-approach speed cap (m/s, controller) |
 | `maxMassKg` | `0` | `0` = no gate; otherwise stop loading near this mass |
@@ -83,18 +83,27 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 | `gyroDamp` | `3` | Attitude damping. Raise it if a hull still wobbles/overshoots/jiggles onto heading; lower toward `2` for snappier turns |
 | `cruiseAttitude` | `auto` | Attitude while flying **in gravity**. `auto` = fly level (belly-down VTOL climb) if the hull is lift-heavy, else nose-to-path; `level` = force VTOL climb (strong down-thrusters lift); `nose` = force nose-along-path. In space it always flies nose-forward regardless |
 | `dockClearCheck` | `true` | Anti-collision: raycast the docking corridor on final approach and **hold off** if another grid is parked on / crossing the connector, resuming when clear. Set `false` to disable |
-| `cameraTag` | `[SHUTTLE:CAM]` | Cameras that watch the dock (name **contains** the tag). If none are tagged, every camera on the grid is used and the one actually facing the dock is picked automatically |
+| `cameraTag` | `[SF:CAM]` | Cameras that watch the dock (name **contains** the tag). If none are tagged, every camera on the grid is used and the one actually facing the dock is picked automatically |
 | `dockBlockSec` | `0` | Seconds a blocked corridor is tolerated before the shuttle **faults**. `0` = wait indefinitely — so a false positive only ever costs time, never a fault |
 
 The recorded route lives in a separate `[route]` section that the script writes for you.
 **To clone a route to another identical ship, copy that whole `[route]` section into its PB.**
+
+> **Upgrading from a `[SHUTTLE]` build (≤ 0.5.1).** As of 0.6.0 the config section is `[sf]`,
+> the cockpit screen-map section is `[sf-screens]`, and the default block tags are the `[SF]`
+> family. Your existing config migrates automatically on first recompile — every key is copied
+> from `[shuttle]` into `[sf]` and nothing is lost — and legacy `[shuttle-screens]` cockpit
+> sections are still read. Your existing `[SHUTTLE]`-named panels, sorters and cameras keep
+> working too, because the tags are stored *values* that survive the migration. To switch a
+> grid over to the new `[SF]` tags, edit the tag keys in `[sf]` (or clear Custom Data to
+> re-seed the `[SF]` defaults) and rename the blocks to match.
 
 ### Tagging sorters
 
 The script finds its cargo sorters by tag, not by exact name. Any conveyor sorter whose name
 **contains** `loadTag` is switched on while loading; any that contains `unloadTag` is switched
 on while unloading. Matching is case-insensitive and the tag can appear anywhere in the name,
-so `[SHUTTLE:LOAD] Bottom Feeder` and `Ore intake [shuttle:load]` are both picked up. You can
+so `[SF:LOAD] Bottom Feeder` and `Ore intake [sf:load]` are both picked up. You can
 tag several sorters for the same role. Set both tags to whatever suits your fleet (e.g.
 `[SKIPPY:LOAD]`). The script only toggles the sorters on and off — your filters and Drain-All
 settings are left untouched.
@@ -173,12 +182,12 @@ Five views:
 Assign a view two ways:
 
 - **Standalone LCD — name tag.** Append `:view` to the base tag in the panel's name:
-  `[SHUTTLE:trip]`, `[SHUTTLE:menu]`, `[SHUTTLE:status]`, `[SHUTTLE:telem]`. A bare `[SHUTTLE]` stays `full`.
-- **Cockpit / multi-surface block — Custom Data.** Add an opt-in `[shuttle-screens]` section
+  `[SF:trip]`, `[SF:menu]`, `[SF:status]`, `[SF:telem]`. A bare `[SF]` stays `full`.
+- **Cockpit / multi-surface block — Custom Data.** Add an opt-in `[sf-screens]` section
   to the block's Custom Data mapping each surface index to a view:
 
   ```
-  [shuttle-screens]
+  [sf-screens]
   0 = menu
   1 = trip
   2 = telem
@@ -188,17 +197,17 @@ Assign a view two ways:
   3-screen-cockpit case; because it's opt-in, an unconfigured cockpit is never touched. It
   works for the Programmable Block's own screens too.
 
-**Pin a fixed font size** on any screen if you don't want auto-fit: `[SHUTTLE:status:1.4]`
+**Pin a fixed font size** on any screen if you don't want auto-fit: `[SF:status:1.4]`
 (name tag) or `2 = status@1.4` (Custom Data). Omit the size to keep the per-screen auto-fit.
 
 **Pin the padding too** — the screen's `TextPadding` (% inset per side, clamped 0–40) as a
 persistent option the auto-fit respects, so a cramped surface can breathe and won't reset on
-the next recompile. Append it after the size: `[SHUTTLE:status:1.4:6]` (name tag,
+the next recompile. Append it after the size: `[SF:status:1.4:6]` (name tag,
 `:view:size:pad`) or `2 = status@1.4/6` (Custom Data, `view@font/pad`). Leave the font on
-auto-fit while still setting padding with `[SHUTTLE:status::6]` or `2 = status@/6`. The
+auto-fit while still setting padding with `[SF:status::6]` or `2 = status@/6`. The
 auto-fit subtracts the padding from the usable area, so padded text still fits.
 
-> **Recompile after editing `[shuttle-screens]`.** Screen assignments (and the base tag on
+> **Recompile after editing `[sf-screens]`.** Screen assignments (and the base tag on
 > LCD names) are read when the script discovers blocks, which happens on recompile. Change
 > the section, then recompile the PB to see the new layout.
 
@@ -248,7 +257,7 @@ skips the hydrogen check; one with no batteries skips the charge check.
 
 ## Base board
 
-Set a base PB to `role = base` and the same `channel`. Tag base LCDs with `[SHUTTLE]`
+Set a base PB to `role = base` and the same `channel`. Tag base LCDs with `[SF]`
 (or your `lcdTag`). The board shows each shuttle's state, ETA, distance, cargo % and mass,
 and flags **NO SIGNAL** if a shuttle drops off the network (e.g. beyond antenna range).
 
@@ -282,7 +291,7 @@ range of each other (see the range note above).
   clear. It knows the base from an intruder because `RECORD HOME`/`RECORD DEST` capture the base's
   grid id — so the base's own connector and off-axis neighbours never false-trigger; only a ship
   genuinely in the approach path holds it. It needs **a camera that can see the dock**: mount one
-  facing the connector's approach axis (tag it `cameraTag`, default `[SHUTTLE:CAM]`, or leave all
+  facing the connector's approach axis (tag it `cameraTag`, default `[SF:CAM]`, or leave all
   cameras untagged and the shuttle picks whichever faces the dock). With no camera that can see the
   corridor it degrades gracefully — it simply docks as before (no false holds). A blocked corridor
   **waits forever by default** (`dockBlockSec = 0`); set `dockBlockSec` to fault after N seconds if

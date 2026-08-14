@@ -1,6 +1,6 @@
 /*//////////////////////////////////////////////////////////////////////////////
- * SkippyShuttle - Autonomous two-connector delivery shuttle for Space Engineers.
- * A PAM replacement for pure ferry duty: cargo between two docks (e.g. a planet
+ * SkippyFlight - Autonomous two-connector delivery shuttle for Space Engineers.
+ * For pure ferry duty: cargo between two docks (e.g. a planet
  * base and an orbital station). Full docs in README.md / CHANGELOG.md.
  *
  * ONE script, TWO roles - paste into both PBs; role is set in Custom Data:
@@ -17,13 +17,13 @@
  *   DEPART <shipName>, to the fleet) | MODE CONTINUOUS|ONETRIP|ONEWAY | RESUME |
  *   CLEARROUTE | UP | DOWN | APPLY | BACK (the last four drive the on-screen menu).
  *
- * CONFIG: the [shuttle] Custom Data section (auto-generated; every key optional
+ * CONFIG: the [sf] Custom Data section (auto-generated; every key optional
  * except role). See README.md for the full key table and semantics.
  *
  * SCREEN VIEWS: each ship screen shows ONE view so a multi-screen cockpit can split
  * the display - full (header+menu, the default), menu, status, trip. Assign via a
- * tagged LCD name ([SHUTTLE] = full, [SHUTTLE:trip], [SHUTTLE:menu:1.2] to pin the
- * font, [SHUTTLE:status:1.4:6] to also pin 6% padding) or a [shuttle-screens] section
+ * tagged LCD name ([SF] = full, [SF:trip], [SF:menu:1.2] to pin the
+ * font, [SF:status:1.4:6] to also pin 6% padding) or an [sf-screens] section
  * in a cockpit/PB's own Custom Data mapping surface index -> view (e.g.
  * "2 = status@1.4/6" = view@font/pad). Each screen sizes to its OWN content, so a
  * small screen no longer shrinks a big wall LCD; an untagged rig is unchanged (full
@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.5.1";
+const string VERSION = "0.6.0";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -243,9 +243,9 @@ DepartTrigger destTrigger = DepartTrigger.Auto;   // what releases it from the D
 string shipName = "Skippy";
 string channel = "SkippyShuttleNet";
 string remoteName = "";
-string loadTag = "[SHUTTLE:LOAD]";
-string unloadTag = "[SHUTTLE:UNLOAD]";
-string lcdTag = "[SHUTTLE]";
+string loadTag = "[SF:LOAD]";
+string unloadTag = "[SF:UNLOAD]";
+string lcdTag = "[SF]";
 float cruiseSpeed = 100f;
 float dockSpeed = 5f;
 double maxMassKg = 0;
@@ -267,7 +267,7 @@ double gyroGain = 4.0;            // attitude controller P gain (rotate toward t
 double gyroDamp = 3.0;            // attitude controller damping on angular velocity; raise if the ship wobbles/overshoots/jiggles
 string cruiseAttitude = "auto";   // gravity-leg attitude: "auto" (level if lift-heavy, else nose), "level" (VTOL climb, belly down), "nose" (nose along path)
 bool dockClearCheck = true;       // anti-collision: raycast the docking corridor on final approach and hold off if another grid is parked on / crossing the connector
-string cameraTag = "[SHUTTLE:CAM]"; // cameras that watch the dock; blank / no match = auto-use every camera and pick whichever faces the dock at check time
+string cameraTag = "[SF:CAM]"; // cameras that watch the dock; blank / no match = auto-use every camera and pick whichever faces the dock at check time
 double dockBlockSec = 0;          // [s] fault if the corridor stays blocked this long. 0 = wait indefinitely (a blocked dock holds forever, never faults)
 
 // ---- Route data ------------------------------------------------------------
@@ -324,8 +324,8 @@ bool stagingAtFix = false;                         // latched once the ship firs
 // (menu on one, trip info on another, a compact status on a third) instead of
 // cramming everything onto every panel. "full" is the whole header+menu (the
 // original layout) and stays the default, so any screen not explicitly assigned
-// looks exactly as before. A screen picks its view by name tag ([SHUTTLE:trip])
-// or, for a multi-surface block like a cockpit, a [shuttle-screens] section in
+// looks exactly as before. A screen picks its view by name tag ([SF:trip])
+// or, for a multi-surface block like a cockpit, a [sf-screens] section in
 // that block's Custom Data (see ParseScreenTag / Discover).
 const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 
@@ -351,7 +351,7 @@ List<IMyCargoContainer> cargo = new List<IMyCargoContainer>();
 // TextPadding (% per side); the auto-fit subtracts it so text still fits.
 struct ScreenTarget { public IMyTextSurface Surface; public string View; public float FixedSize; public float Pad; }
 List<ScreenTarget> shipScreens = new List<ScreenTarget>();
-IMyTextSurface pbSurface;                            // the PB's own screen (fallback full view when no [shuttle-screens] on it)
+IMyTextSurface pbSurface;                            // the PB's own screen (fallback full view when no [sf-screens] on it)
 List<IMyGyro> gyros = new List<IMyGyro>();          // final-approach attitude control
 List<IMyThrust> thrusters = new List<IMyThrust>();  // final-approach translation control
 List<IMyGasTank> h2Tanks = new List<IMyGasTank>();  // hydrogen tanks (fuel-gate reading)
@@ -722,7 +722,7 @@ void SetMode(string m)
         default: statusMsg = "Mode must be CONTINUOUS|ONETRIP|ONEWAY"; return;
     }
     var ini = new MyIni(); ini.TryParse(Me.CustomData);
-    ini.Set("shuttle", "runMode", m);
+    ini.Set("sf", "runMode", m);
     Me.CustomData = ini.ToString();
     statusMsg = "Mode = " + runMode;
 }
@@ -1938,9 +1938,9 @@ void Discover()
 
     // Status surfaces. Two ways a screen picks its view:
     //   1. A tagged text panel: name contains lcdTag, optionally with a view/size,
-    //      e.g. [SHUTTLE] (full), [SHUTTLE:trip], [SHUTTLE:menu:1.2].
+    //      e.g. [SF] (full), [SF:trip], [SF:menu:1.2].
     //   2. A multi-surface block (cockpit, PB, ...) that OPTS IN via a
-    //      [shuttle-screens] section in its Custom Data mapping surface index -> view
+    //      [sf-screens] section in its Custom Data mapping surface index -> view
     //      (e.g. "0 = menu", "2 = status@1.4"). Opt-in, so it never hijacks an
     //      unrelated cockpit. Each screen is later sized to its OWN content.
     var panels = new List<IMyTextPanel>();
@@ -1952,19 +1952,24 @@ void Discover()
         AddScreen(p, view, size, pad);
     }
 
-    // Multi-surface providers with a [shuttle-screens] config section.
+    // Multi-surface providers with a [sf-screens] config section (or the legacy
+    // [shuttle-screens] name, still honoured so an existing cockpit map keeps working).
     var providers = new List<IMyTerminalBlock>();
     GridTerminalSystem.GetBlocksOfType(providers, b => b.CubeGrid == grid
         && b is IMyTextSurfaceProvider
-        && b.CustomData.IndexOf("shuttle-screens", StringComparison.OrdinalIgnoreCase) >= 0);
+        && (b.CustomData.IndexOf("sf-screens", StringComparison.OrdinalIgnoreCase) >= 0
+            || b.CustomData.IndexOf("shuttle-screens", StringComparison.OrdinalIgnoreCase) >= 0));
     bool pbConfigured = false;
     foreach (var b in providers)
     {
         var prov = b as IMyTextSurfaceProvider;
         var ini = new MyIni();
-        if (!ini.TryParse(b.CustomData) || !ini.ContainsSection("shuttle-screens")) continue;
+        if (!ini.TryParse(b.CustomData)) continue;
+        string sec = ini.ContainsSection("sf-screens") ? "sf-screens"
+                   : ini.ContainsSection("shuttle-screens") ? "shuttle-screens" : null;
+        if (sec == null) continue;
         var keys = new List<MyIniKey>();
-        ini.GetKeys("shuttle-screens", keys);
+        ini.GetKeys(sec, keys);
         foreach (var k in keys)
         {
             int idx;
@@ -1976,20 +1981,20 @@ void Discover()
         if (b == Me) pbConfigured = true;
     }
 
-    // PB's own screen: full-view fallback unless the PB itself declared [shuttle-screens].
+    // PB's own screen: full-view fallback unless the PB itself declared [sf-screens].
     pbSurface = Me.GetSurface(0);
     if (!pbConfigured) { PrepSurface(pbSurface); AddScreen(pbSurface, VIEW_FULL, 0f, 0f); }
 }
 
-// The tag "opener" is lcdTag without a trailing ']', so [SHUTTLE] matches both the
-// plain tag and the extended [SHUTTLE:view] / [SHUTTLE:view:size] forms.
+// The tag "opener" is lcdTag without a trailing ']', so [SF] matches both the
+// plain tag and the extended [SF:view] / [SF:view:size] forms.
 string TagOpener()
 {
     return lcdTag.EndsWith("]") ? lcdTag.Substring(0, lcdTag.Length - 1) : lcdTag;
 }
 
 // Prep + register a screen target, de-duplicating so the same surface isn't added
-// twice (e.g. a panel tagged AND listed in a [shuttle-screens] section).
+// twice (e.g. a panel tagged AND listed in a [sf-screens] section).
 void AddScreen(IMyTextSurface s, string view, float size, float pad)
 {
     if (s == null) return;
@@ -2019,7 +2024,7 @@ void ParseScreenTag(string name, out string view, out float size, out float pad)
 }
 
 // Parse a "view", "view@size", "view@size/pad", or "view/pad" spec from a
-// [shuttle-screens] value. '@' pins the font size, '/' the padding (% per side).
+// [sf-screens] value. '@' pins the font size, '/' the padding (% per side).
 void ParseViewSpec(string spec, out string view, out float size, out float pad)
 {
     view = VIEW_FULL; size = 0f; pad = 0f;
@@ -2440,7 +2445,7 @@ void SaveCfg(string key, object val)
 {
     var ini = new MyIni();
     ini.TryParse(Me.CustomData);
-    ini.Set("shuttle", key, val.ToString());
+    ini.Set("sf", key, val.ToString());
     Me.CustomData = ini.ToString();
 }
 
@@ -2618,7 +2623,7 @@ string BuildTrip()
 // descent - phase timer, speed vs the governor cap, vertical rate, altitude, the
 // gravity magnitude that drives the atmo<->space handoff, waypoint progress, attitude
 // error, and fuel. It is opt-in by assignment: point a dedicated surface at it (a panel
-// named [SHUTTLE:telem], or a cockpit's [shuttle-screens] "0 = telem") and it never
+// named [SF:telem], or a cockpit's [sf-screens] "0 = telem") and it never
 // touches the main info screen.
 string BuildTelem()
 {
@@ -2861,7 +2866,7 @@ void WriteConfigTemplate()
     Me.CustomData = ini.ToString();
 }
 
-// Ensure every known [shuttle] key exists in Custom Data, seeding any that a
+// Ensure every known [sf] key exists in Custom Data, seeding any that a
 // newer script version added with the value currently in effect (the loaded
 // value, or the default if the key was absent). Runs on compile so upgrading the
 // script surfaces its new tuning keys WITHOUT wiping the recorded [route]/[state].
@@ -2874,7 +2879,7 @@ void BackfillConfig()
 }
 
 // A base/station board only ever reads role, shipName, channel and lcdTag - the
-// flight/cargo/fuel keys are meaningless to it. Rewrite the [shuttle] section with
+// flight/cargo/fuel keys are meaningless to it. Rewrite the [sf] section with
 // just those four so a board's Custom Data isn't cluttered with irrelevant tuning
 // (e.g. a block first compiled as a shuttle, then switched to base). Other sections
 // are left untouched. Runs on compile for the base role only.
@@ -2882,7 +2887,7 @@ void TrimBaseConfig()
 {
     var ini = new MyIni();
     ini.TryParse(Me.CustomData);
-    ini.DeleteSection("shuttle");
+    ini.DeleteSection("sf");
     WriteBaseSection(ini);
     Me.CustomData = ini.ToString();
 }
@@ -2891,103 +2896,104 @@ void TrimBaseConfig()
 // "station" alias is rewritten cleanly).
 void WriteBaseSection(MyIni ini)
 {
-    ini.Set("shuttle", "role", "base");
-    ini.Set("shuttle", "shipName", shipName);
-    ini.Set("shuttle", "channel", channel);
-    ini.Set("shuttle", "lcdTag", lcdTag);
+    ini.Set("sf", "role", "base");
+    ini.Set("sf", "shipName", shipName);
+    ini.Set("sf", "channel", channel);
+    ini.Set("sf", "lcdTag", lcdTag);
 }
 
-// Write the full [shuttle] key set from the current field values into an ini,
+// Write the full [sf] key set from the current field values into an ini,
 // leaving all other sections untouched. Shared by the first-run template and the
 // on-compile backfill.
 void WriteShuttleSection(MyIni ini)
 {
     string modeStr = runMode == RunMode.OneTrip ? "ONETRIP"
                    : runMode == RunMode.OneWay ? "ONEWAY" : "CONTINUOUS";
-    ini.Set("shuttle", "role", role == Role.Base ? "base" : "shuttle");
-    ini.Set("shuttle", "shipName", shipName);
-    ini.Set("shuttle", "channel", channel);
-    ini.Set("shuttle", "runMode", modeStr);
-    ini.Set("shuttle", "homeTrigger", homeTrigger.ToString());
-    ini.Set("shuttle", "destTrigger", destTrigger.ToString());
-    ini.Set("shuttle", "remoteName", remoteName);
-    ini.Set("shuttle", "loadTag", loadTag);
-    ini.Set("shuttle", "unloadTag", unloadTag);
-    ini.Set("shuttle", "lcdTag", lcdTag);
-    ini.Set("shuttle", "cruiseSpeed", cruiseSpeed);
-    ini.Set("shuttle", "dockSpeed", dockSpeed);
-    ini.Set("shuttle", "maxMassKg", maxMassKg);
-    ini.Set("shuttle", "departFill", departFill);
-    ini.Set("shuttle", "unloadDrainSec", unloadDrainSec);
-    ini.Set("shuttle", "dwellSec", dwellSec);
-    ini.Set("shuttle", "minHydrogenPct", minHydrogenPct);
-    ini.Set("shuttle", "minBatteryPct", minBatteryPct);
-    ini.Set("shuttle", "fuelMarginPct", fuelMarginPct);
-    ini.Set("shuttle", "segMeters", segMeters);
-    ini.Set("shuttle", "turnDegrees", turnDegrees);
-    ini.Set("shuttle", "simplifyMeters", simplifyMeters);
-    ini.Set("shuttle", "approachDist", approachDist);
-    ini.Set("shuttle", "holdDist", holdDist);
-    ini.Set("shuttle", "gyroRpmCap", gyroRpmCap);
-    ini.Set("shuttle", "brakeFrac", brakeFrac);
-    ini.Set("shuttle", "cornerLen", cornerLen);
-    ini.Set("shuttle", "gyroGain", gyroGain);
-    ini.Set("shuttle", "gyroDamp", gyroDamp);
-    ini.Set("shuttle", "cruiseAttitude", cruiseAttitude);
-    ini.Set("shuttle", "dockClearCheck", dockClearCheck);
-    ini.Set("shuttle", "cameraTag", cameraTag);
-    ini.Set("shuttle", "dockBlockSec", dockBlockSec);
+    ini.Set("sf", "role", role == Role.Base ? "base" : "shuttle");
+    ini.Set("sf", "shipName", shipName);
+    ini.Set("sf", "channel", channel);
+    ini.Set("sf", "runMode", modeStr);
+    ini.Set("sf", "homeTrigger", homeTrigger.ToString());
+    ini.Set("sf", "destTrigger", destTrigger.ToString());
+    ini.Set("sf", "remoteName", remoteName);
+    ini.Set("sf", "loadTag", loadTag);
+    ini.Set("sf", "unloadTag", unloadTag);
+    ini.Set("sf", "lcdTag", lcdTag);
+    ini.Set("sf", "cruiseSpeed", cruiseSpeed);
+    ini.Set("sf", "dockSpeed", dockSpeed);
+    ini.Set("sf", "maxMassKg", maxMassKg);
+    ini.Set("sf", "departFill", departFill);
+    ini.Set("sf", "unloadDrainSec", unloadDrainSec);
+    ini.Set("sf", "dwellSec", dwellSec);
+    ini.Set("sf", "minHydrogenPct", minHydrogenPct);
+    ini.Set("sf", "minBatteryPct", minBatteryPct);
+    ini.Set("sf", "fuelMarginPct", fuelMarginPct);
+    ini.Set("sf", "segMeters", segMeters);
+    ini.Set("sf", "turnDegrees", turnDegrees);
+    ini.Set("sf", "simplifyMeters", simplifyMeters);
+    ini.Set("sf", "approachDist", approachDist);
+    ini.Set("sf", "holdDist", holdDist);
+    ini.Set("sf", "gyroRpmCap", gyroRpmCap);
+    ini.Set("sf", "brakeFrac", brakeFrac);
+    ini.Set("sf", "cornerLen", cornerLen);
+    ini.Set("sf", "gyroGain", gyroGain);
+    ini.Set("sf", "gyroDamp", gyroDamp);
+    ini.Set("sf", "cruiseAttitude", cruiseAttitude);
+    ini.Set("sf", "dockClearCheck", dockClearCheck);
+    ini.Set("sf", "cameraTag", cameraTag);
+    ini.Set("sf", "dockBlockSec", dockBlockSec);
 }
 
 void LoadConfig()
 {
     var ini = new MyIni();
     if (!ini.TryParse(Me.CustomData)) return;
+    MigrateLegacyConfig(ini);       // one-time [shuttle] -> [sf]
     // Role: "base" (or its alias "station") renders the board; anything else flies.
-    string roleStr = ini.Get("shuttle", "role").ToString("shuttle").Trim().ToLowerInvariant();
+    string roleStr = ini.Get("sf", "role").ToString("shuttle").Trim().ToLowerInvariant();
     role = (roleStr == "base" || roleStr == "station") ? Role.Base : Role.Shuttle;
-    shipName = ini.Get("shuttle", "shipName").ToString(shipName);
-    channel = ini.Get("shuttle", "channel").ToString(channel);
+    shipName = ini.Get("sf", "shipName").ToString(shipName);
+    channel = ini.Get("sf", "channel").ToString(channel);
     // Run mode. Legacy WAITFULL folds into Continuous + a Cargo home trigger, but
     // only supplies that default if no explicit homeTrigger key is present, so a new
     // config's homeTrigger always wins.
-    string modeStr = ini.Get("shuttle", "runMode").ToString("CONTINUOUS").Trim().ToUpperInvariant();
+    string modeStr = ini.Get("sf", "runMode").ToString("CONTINUOUS").Trim().ToUpperInvariant();
     string defHome = "Auto";
     if (modeStr == "WAITFULL") { runMode = RunMode.Continuous; defHome = "Cargo"; }
     else SetModeSilent(modeStr);
-    homeTrigger = TrigFromString(ini.Get("shuttle", "homeTrigger").ToString(defHome));
-    destTrigger = TrigFromString(ini.Get("shuttle", "destTrigger").ToString("Auto"));
-    remoteName = ini.Get("shuttle", "remoteName").ToString("");
+    homeTrigger = TrigFromString(ini.Get("sf", "homeTrigger").ToString(defHome));
+    destTrigger = TrigFromString(ini.Get("sf", "destTrigger").ToString("Auto"));
+    remoteName = ini.Get("sf", "remoteName").ToString("");
     // Sorter tags; fall back to the legacy exact-name keys (a full name still
     // matches as a substring tag), else the defaults.
-    loadTag = ini.Get("shuttle", "loadTag").ToString(ini.Get("shuttle", "loadSorter").ToString(loadTag));
-    unloadTag = ini.Get("shuttle", "unloadTag").ToString(ini.Get("shuttle", "unloadSorter").ToString(unloadTag));
-    lcdTag = ini.Get("shuttle", "lcdTag").ToString(lcdTag);
-    cruiseSpeed = (float)ini.Get("shuttle", "cruiseSpeed").ToDouble(cruiseSpeed);
-    dockSpeed = (float)ini.Get("shuttle", "dockSpeed").ToDouble(dockSpeed);
-    maxMassKg = ini.Get("shuttle", "maxMassKg").ToDouble(maxMassKg);
-    departFill = ini.Get("shuttle", "departFill").ToDouble(departFill);
-    unloadDrainSec = ini.Get("shuttle", "unloadDrainSec").ToDouble(unloadDrainSec);
-    dwellSec = ini.Get("shuttle", "dwellSec").ToDouble(dwellSec);
-    minHydrogenPct = Clamp(ini.Get("shuttle", "minHydrogenPct").ToDouble(minHydrogenPct), 0, 100);
-    minBatteryPct = Clamp(ini.Get("shuttle", "minBatteryPct").ToDouble(minBatteryPct), 0, 100);
-    fuelMarginPct = Math.Max(0, ini.Get("shuttle", "fuelMarginPct").ToDouble(fuelMarginPct));
-    segMeters = ini.Get("shuttle", "segMeters").ToDouble(segMeters);
-    turnDegrees = ini.Get("shuttle", "turnDegrees").ToDouble(turnDegrees);
-    simplifyMeters = ini.Get("shuttle", "simplifyMeters").ToDouble(simplifyMeters);
-    approachDist = ini.Get("shuttle", "approachDist").ToDouble(approachDist);
-    holdDist = Math.Max(approachDist + 5, ini.Get("shuttle", "holdDist").ToDouble(holdDist));
-    gyroRpmCap = (float)ini.Get("shuttle", "gyroRpmCap").ToDouble(gyroRpmCap);
-    brakeFrac = Clamp(ini.Get("shuttle", "brakeFrac").ToDouble(brakeFrac), 0.1, 1.0);
-    cornerLen = Math.Max(1.0, ini.Get("shuttle", "cornerLen").ToDouble(cornerLen));
-    gyroGain = Math.Max(0.1, ini.Get("shuttle", "gyroGain").ToDouble(gyroGain));
-    gyroDamp = Math.Max(0.0, ini.Get("shuttle", "gyroDamp").ToDouble(gyroDamp));
+    loadTag = ini.Get("sf", "loadTag").ToString(ini.Get("sf", "loadSorter").ToString(loadTag));
+    unloadTag = ini.Get("sf", "unloadTag").ToString(ini.Get("sf", "unloadSorter").ToString(unloadTag));
+    lcdTag = ini.Get("sf", "lcdTag").ToString(lcdTag);
+    cruiseSpeed = (float)ini.Get("sf", "cruiseSpeed").ToDouble(cruiseSpeed);
+    dockSpeed = (float)ini.Get("sf", "dockSpeed").ToDouble(dockSpeed);
+    maxMassKg = ini.Get("sf", "maxMassKg").ToDouble(maxMassKg);
+    departFill = ini.Get("sf", "departFill").ToDouble(departFill);
+    unloadDrainSec = ini.Get("sf", "unloadDrainSec").ToDouble(unloadDrainSec);
+    dwellSec = ini.Get("sf", "dwellSec").ToDouble(dwellSec);
+    minHydrogenPct = Clamp(ini.Get("sf", "minHydrogenPct").ToDouble(minHydrogenPct), 0, 100);
+    minBatteryPct = Clamp(ini.Get("sf", "minBatteryPct").ToDouble(minBatteryPct), 0, 100);
+    fuelMarginPct = Math.Max(0, ini.Get("sf", "fuelMarginPct").ToDouble(fuelMarginPct));
+    segMeters = ini.Get("sf", "segMeters").ToDouble(segMeters);
+    turnDegrees = ini.Get("sf", "turnDegrees").ToDouble(turnDegrees);
+    simplifyMeters = ini.Get("sf", "simplifyMeters").ToDouble(simplifyMeters);
+    approachDist = ini.Get("sf", "approachDist").ToDouble(approachDist);
+    holdDist = Math.Max(approachDist + 5, ini.Get("sf", "holdDist").ToDouble(holdDist));
+    gyroRpmCap = (float)ini.Get("sf", "gyroRpmCap").ToDouble(gyroRpmCap);
+    brakeFrac = Clamp(ini.Get("sf", "brakeFrac").ToDouble(brakeFrac), 0.1, 1.0);
+    cornerLen = Math.Max(1.0, ini.Get("sf", "cornerLen").ToDouble(cornerLen));
+    gyroGain = Math.Max(0.1, ini.Get("sf", "gyroGain").ToDouble(gyroGain));
+    gyroDamp = Math.Max(0.0, ini.Get("sf", "gyroDamp").ToDouble(gyroDamp));
     // Gravity-leg attitude: only auto/level/nose are meaningful; anything else falls back to auto.
-    string attStr = ini.Get("shuttle", "cruiseAttitude").ToString(cruiseAttitude).Trim().ToLowerInvariant();
+    string attStr = ini.Get("sf", "cruiseAttitude").ToString(cruiseAttitude).Trim().ToLowerInvariant();
     cruiseAttitude = (attStr == "level" || attStr == "nose") ? attStr : "auto";
-    dockClearCheck = ini.Get("shuttle", "dockClearCheck").ToBoolean(dockClearCheck);
-    cameraTag = ini.Get("shuttle", "cameraTag").ToString(cameraTag);
-    dockBlockSec = Math.Max(0, ini.Get("shuttle", "dockBlockSec").ToDouble(dockBlockSec));
+    dockClearCheck = ini.Get("sf", "dockClearCheck").ToBoolean(dockClearCheck);
+    cameraTag = ini.Get("sf", "cameraTag").ToString(cameraTag);
+    dockBlockSec = Math.Max(0, ini.Get("sf", "dockBlockSec").ToDouble(dockBlockSec));
 }
 
 void SetModeSilent(string m)
@@ -3070,6 +3076,19 @@ void LoadRoute()
 
     activeRoute = active;
     LoadRouteInto(ini, active);
+}
+
+// The [shuttle] config section was renamed to [sf] in 0.6.0. Copy its keys into [sf]
+// the first time we see the old layout, then drop it, so an existing ship keeps all its
+// tuning (and its persisted tag values) without re-entering anything.
+void MigrateLegacyConfig(MyIni ini)
+{
+    if (!ini.ContainsSection("shuttle") || ini.ContainsSection("sf")) return;
+    var keys = new List<MyIniKey>();
+    ini.GetKeys("shuttle", keys);
+    foreach (var k in keys) ini.Set("sf", k.Name, ini.Get(k).ToString(""));
+    ini.DeleteSection("shuttle");
+    Me.CustomData = ini.ToString();     // persist the migration
 }
 
 // Copy a legacy single [route] section into [route.Main] the first time we see it,

@@ -7,16 +7,19 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.5.1 (Slice b delivered + DepartStaging staging-turn fix — `DepartStaging`/`Holding`/`Taxi` phases with derived
+- **Version:** 0.6.0 (Slice b delivered + DepartStaging staging-turn fix, then the `SF` tag/config
+  rename — `DepartStaging`/`Holding`/`Taxi` phases with derived
   outer stand-off fixes and the local clearance gate. The ship assembles at a staging fix before
   flying and holds at an arrival fix before docking; only the clearance-gated `Taxi` phase ever
   touches a connector. Reorientation to the dock attitude is gravity-gated. Plus Slice a's
-  phase-object base controller, multiple named routes, and the telemetry debug view.)
+  phase-object base controller, multiple named routes, and the telemetry debug view. Block tags
+  and Custom Data sections are now keyed to `SF` — `[SF]`/`[SF:LOAD]`/`[SF:CAM]`, the `[sf]` config
+  section, and `[sf-screens]` — with lossless auto-migration from the old `[shuttle]` layout.)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
   pipe-delimited reports) so a SkippyFlight ship and a Skippy-Shuttle base interoperate. Config
-  idioms (`MyIni`, `[shuttle]`/`[route]`/`[state]` sections) shared by convention, not code.
+  idioms (`MyIni`, `[sf]`/`[route]`/`[state]` sections) shared by convention, not code.
 
 ---
 
@@ -231,7 +234,7 @@ Baseline (v0.1.0, unmodified copy): stripped **70,780 chars**, **29,220** headro
 After Slice a (v0.2.0, phase objects): stripped **75,112 chars**, **24,888** headroom (+4,332).
 After Slice b (v0.5.0, staging/holding/taxi): stripped **87,841 chars**, **12,159** headroom
 (+4,368 vs 0.4.1; the intervening named-routes and telemetry extras account for the rest).
-After the v0.5.1 DepartStaging fix: stripped **88,835 chars**, **11,165** headroom (+1,000 vs
+After the v0.6.0 `SF` rename: stripped **89,034 chars**, **10,966** headroom (+199 vs
 0.5.0; the `stagingAtFix` latch, coast-hold staging turn, and `StationKeep` helper, less the
 duplicate-ETA removal).
 
@@ -272,7 +275,7 @@ connector.
 - [x] `Taxi` phase — the cleared final move down the connector axis onto the connector; corridor
       foul mid-taxi falls back to `Holding` rather than pressing in.
 - [x] `holdDist` config + per-dock `homeHoldDist`/`destHoldDist` route overrides (forced clear
-      outside the inner stand-off); persisted in `[shuttle]` and each `[route.<name>]`.
+      outside the inner stand-off); persisted in `[sf]` and each `[route.<name>]`.
 - [x] `BuildLeg` final waypoint → the arrival holding fix; per-end `EffHoldDist` crumb-skip radius.
 - [x] Legacy `Approach` phase delegates to `TickHolding`; IGC wire names unchanged for a
       Skippy-Shuttle base board. Rebuild + budget check: **87,841 chars (12,159 headroom)**, braces
@@ -308,7 +311,7 @@ is a no-op, so this slice ships without regression.
   bypasses everything.
 
 **Ship-side additions:**
-- [ ] Config `useTower` (Auto/Off), persisted in `[shuttle]` and per-`[route.<name>]` override;
+- [ ] Config `useTower` (Auto/Off), persisted in `[sf]` and per-`[route.<name>]` override;
       new row on the Depart settings page (`PAGE_DEPART` 7 → 8 items).
 - [ ] State: `towerAge` (since last heartbeat), `towerActive = useTower==Auto && towerAge <
       TOWER_TIMEOUT`; per-pending-action `clearanceRequested` / `cleared` / `holdReason`; consts
@@ -327,7 +330,7 @@ is a no-op, so this slice ships without regression.
       operator `DEPART` during a tower hold → override wins; `useTower=Off` → byte-for-byte
       current behavior.
 - [ ] Rebuild + budget check (`python tools/build-min.py`); record stripped size (est. modest —
-      one setting, one gate helper, ~4 message cases, status strings; current headroom 11,138).
+      one setting, one gate helper, ~4 message cases, status strings; current headroom ~10,966).
 
 ### Slice f — SkippyTower.cs
 
@@ -362,7 +365,7 @@ existing passive base/board role into an active-control mode:
 - **Telemetry debug view (0.4.0).** A `telem` screen view surfacing live flight-law signals
   (phase + time-in-phase, speed vs governor cap, vertical rate, surface altitude, gravity
   magnitude, waypoint `i/N` + remaining distance, attitude error, H2/battery). Opt-in by
-  assignment — a panel named `[SHUTTLE:telem]` or a cockpit `[shuttle-screens]` entry `0 = telem`
+  assignment — a panel named `[SF:telem]` or a cockpit `[sf-screens]` entry `0 = telem`
   — so it never crowds the main info screen. `AlignTo` now latches `lastAlignErr` for the view,
   making an attitude stall visible live. Groundwork for Slice d's environment sensing (it already
   reads `TryGetPlanetElevation` and gravity magnitude). Stripped size after: 83,473 chars

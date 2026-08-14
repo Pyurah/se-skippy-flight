@@ -4,6 +4,41 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-08-14
+
+Block-tag and config-section rename — the script no longer calls itself "shuttle" on the
+blocks it touches. The default grid tags and the Custom Data sections it reads are now keyed
+to **`SF`** (for SkippyFlight). The IGC channel keyword (`SkippyShuttleNet`) and the flying
+`role = shuttle` value are unchanged — those are network/role identifiers, not device tags.
+
+### Changed
+- **Default block tags renamed** to the `[SF]` family:
+  - `lcdTag` `[SHUTTLE]` → `[SF]` (and the derived view tags `[SF:trip]`, `[SF:menu:1.2]`,
+    `[SF:status:1.4:6]`, `[SF:telem]` follow automatically — they are `lcdTag` minus its `]`).
+  - `loadTag` `[SHUTTLE:LOAD]` → `[SF:LOAD]`, `unloadTag` `[SHUTTLE:UNLOAD]` → `[SF:UNLOAD]`.
+  - `cameraTag` `[SHUTTLE:CAM]` → `[SF:CAM]`.
+- **Config section renamed** `[shuttle]` → `[sf]` in the PB's Custom Data.
+- **Cockpit screen-map section renamed** `[shuttle-screens]` → `[sf-screens]`.
+
+### Migration
+- **Config is migrated automatically and losslessly.** On first load after the update,
+  `LoadConfig` copies every key from an existing `[shuttle]` section into `[sf]` and drops the
+  old section (`MigrateLegacyConfig`, same one-time pattern as the `[route]` → `[route.Main]`
+  migration). No tuning, trigger, or tag value is lost.
+- **The legacy `[shuttle-screens]` cockpit section is still honoured.** Discovery reads
+  `[sf-screens]` first and falls back to `[shuttle-screens]`, so an existing multi-surface
+  cockpit map keeps working with no edit.
+- **Existing block tags keep working.** Because the tags are stored *values* (not hardcoded),
+  a ship already carrying `lcdTag = [SHUTTLE]` in its Custom Data keeps that value through the
+  migration and its `[SHUTTLE]`-named panels/sorters/cameras stay matched. The `[SF]` defaults
+  apply to **fresh installs**. To adopt the new tags on an existing grid, edit the tag keys in
+  the `[sf]` section (or clear Custom Data to re-seed defaults) and rename the blocks to match.
+
+### Notes
+- Stripped deploy size: 89,034 chars (10,966 under the 100,000 PB limit; +199 vs 0.5.1).
+  Braces balanced (453/453). Version constant bumped to 0.6.0. Pre-1.0 MINOR: this is a
+  default-tag change, non-destructive to existing deployments thanks to the migration.
+
 ## [0.5.1] - 2026-08-14
 
 ### Fixed

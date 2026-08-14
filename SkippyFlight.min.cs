@@ -1,4 +1,4 @@
-const string VERSION = "0.5.1";
+const string VERSION = "0.6.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -127,9 +127,9 @@ DepartTrigger destTrigger = DepartTrigger.Auto;
 string shipName = "Skippy";
 string channel = "SkippyShuttleNet";
 string remoteName = "";
-string loadTag = "[SHUTTLE:LOAD]";
-string unloadTag = "[SHUTTLE:UNLOAD]";
-string lcdTag = "[SHUTTLE]";
+string loadTag = "[SF:LOAD]";
+string unloadTag = "[SF:UNLOAD]";
+string lcdTag = "[SF]";
 float cruiseSpeed = 100f;
 float dockSpeed = 5f;
 double maxMassKg = 0;
@@ -151,7 +151,7 @@ double gyroGain = 4.0;
 double gyroDamp = 3.0;
 string cruiseAttitude = "auto";
 bool dockClearCheck = true;
-string cameraTag = "[SHUTTLE:CAM]";
+string cameraTag = "[SF:CAM]";
 double dockBlockSec = 0;
 DockPose homePose, destPose;
 string homeConn = "", destConn = "";
@@ -483,7 +483,7 @@ void SetMode(string m)
         default: statusMsg = "Mode must be CONTINUOUS|ONETRIP|ONEWAY"; return;
     }
     var ini = new MyIni(); ini.TryParse(Me.CustomData);
-    ini.Set("shuttle", "runMode", m);
+    ini.Set("sf", "runMode", m);
     Me.CustomData = ini.ToString();
     statusMsg = "Mode = " + runMode;
 }
@@ -1284,15 +1284,19 @@ void Discover()
     var providers = new List<IMyTerminalBlock>();
     GridTerminalSystem.GetBlocksOfType(providers, b => b.CubeGrid == grid
         && b is IMyTextSurfaceProvider
-        && b.CustomData.IndexOf("shuttle-screens", StringComparison.OrdinalIgnoreCase) >= 0);
+        && (b.CustomData.IndexOf("sf-screens", StringComparison.OrdinalIgnoreCase) >= 0
+            || b.CustomData.IndexOf("shuttle-screens", StringComparison.OrdinalIgnoreCase) >= 0));
     bool pbConfigured = false;
     foreach (var b in providers)
     {
         var prov = b as IMyTextSurfaceProvider;
         var ini = new MyIni();
-        if (!ini.TryParse(b.CustomData) || !ini.ContainsSection("shuttle-screens")) continue;
+        if (!ini.TryParse(b.CustomData)) continue;
+        string sec = ini.ContainsSection("sf-screens") ? "sf-screens"
+                   : ini.ContainsSection("shuttle-screens") ? "shuttle-screens" : null;
+        if (sec == null) continue;
         var keys = new List<MyIniKey>();
-        ini.GetKeys("shuttle-screens", keys);
+        ini.GetKeys(sec, keys);
         foreach (var k in keys)
         {
             int idx;
@@ -1667,7 +1671,7 @@ void SaveCfg(string key, object val)
 {
     var ini = new MyIni();
     ini.TryParse(Me.CustomData);
-    ini.Set("shuttle", key, val.ToString());
+    ini.Set("sf", key, val.ToString());
     Me.CustomData = ini.ToString();
 }
 List<string> MenuLabels()
@@ -2015,97 +2019,98 @@ void TrimBaseConfig()
 {
     var ini = new MyIni();
     ini.TryParse(Me.CustomData);
-    ini.DeleteSection("shuttle");
+    ini.DeleteSection("sf");
     WriteBaseSection(ini);
     Me.CustomData = ini.ToString();
 }
 void WriteBaseSection(MyIni ini)
 {
-    ini.Set("shuttle", "role", "base");
-    ini.Set("shuttle", "shipName", shipName);
-    ini.Set("shuttle", "channel", channel);
-    ini.Set("shuttle", "lcdTag", lcdTag);
+    ini.Set("sf", "role", "base");
+    ini.Set("sf", "shipName", shipName);
+    ini.Set("sf", "channel", channel);
+    ini.Set("sf", "lcdTag", lcdTag);
 }
 void WriteShuttleSection(MyIni ini)
 {
     string modeStr = runMode == RunMode.OneTrip ? "ONETRIP"
                    : runMode == RunMode.OneWay ? "ONEWAY" : "CONTINUOUS";
-    ini.Set("shuttle", "role", role == Role.Base ? "base" : "shuttle");
-    ini.Set("shuttle", "shipName", shipName);
-    ini.Set("shuttle", "channel", channel);
-    ini.Set("shuttle", "runMode", modeStr);
-    ini.Set("shuttle", "homeTrigger", homeTrigger.ToString());
-    ini.Set("shuttle", "destTrigger", destTrigger.ToString());
-    ini.Set("shuttle", "remoteName", remoteName);
-    ini.Set("shuttle", "loadTag", loadTag);
-    ini.Set("shuttle", "unloadTag", unloadTag);
-    ini.Set("shuttle", "lcdTag", lcdTag);
-    ini.Set("shuttle", "cruiseSpeed", cruiseSpeed);
-    ini.Set("shuttle", "dockSpeed", dockSpeed);
-    ini.Set("shuttle", "maxMassKg", maxMassKg);
-    ini.Set("shuttle", "departFill", departFill);
-    ini.Set("shuttle", "unloadDrainSec", unloadDrainSec);
-    ini.Set("shuttle", "dwellSec", dwellSec);
-    ini.Set("shuttle", "minHydrogenPct", minHydrogenPct);
-    ini.Set("shuttle", "minBatteryPct", minBatteryPct);
-    ini.Set("shuttle", "fuelMarginPct", fuelMarginPct);
-    ini.Set("shuttle", "segMeters", segMeters);
-    ini.Set("shuttle", "turnDegrees", turnDegrees);
-    ini.Set("shuttle", "simplifyMeters", simplifyMeters);
-    ini.Set("shuttle", "approachDist", approachDist);
-    ini.Set("shuttle", "holdDist", holdDist);
-    ini.Set("shuttle", "gyroRpmCap", gyroRpmCap);
-    ini.Set("shuttle", "brakeFrac", brakeFrac);
-    ini.Set("shuttle", "cornerLen", cornerLen);
-    ini.Set("shuttle", "gyroGain", gyroGain);
-    ini.Set("shuttle", "gyroDamp", gyroDamp);
-    ini.Set("shuttle", "cruiseAttitude", cruiseAttitude);
-    ini.Set("shuttle", "dockClearCheck", dockClearCheck);
-    ini.Set("shuttle", "cameraTag", cameraTag);
-    ini.Set("shuttle", "dockBlockSec", dockBlockSec);
+    ini.Set("sf", "role", role == Role.Base ? "base" : "shuttle");
+    ini.Set("sf", "shipName", shipName);
+    ini.Set("sf", "channel", channel);
+    ini.Set("sf", "runMode", modeStr);
+    ini.Set("sf", "homeTrigger", homeTrigger.ToString());
+    ini.Set("sf", "destTrigger", destTrigger.ToString());
+    ini.Set("sf", "remoteName", remoteName);
+    ini.Set("sf", "loadTag", loadTag);
+    ini.Set("sf", "unloadTag", unloadTag);
+    ini.Set("sf", "lcdTag", lcdTag);
+    ini.Set("sf", "cruiseSpeed", cruiseSpeed);
+    ini.Set("sf", "dockSpeed", dockSpeed);
+    ini.Set("sf", "maxMassKg", maxMassKg);
+    ini.Set("sf", "departFill", departFill);
+    ini.Set("sf", "unloadDrainSec", unloadDrainSec);
+    ini.Set("sf", "dwellSec", dwellSec);
+    ini.Set("sf", "minHydrogenPct", minHydrogenPct);
+    ini.Set("sf", "minBatteryPct", minBatteryPct);
+    ini.Set("sf", "fuelMarginPct", fuelMarginPct);
+    ini.Set("sf", "segMeters", segMeters);
+    ini.Set("sf", "turnDegrees", turnDegrees);
+    ini.Set("sf", "simplifyMeters", simplifyMeters);
+    ini.Set("sf", "approachDist", approachDist);
+    ini.Set("sf", "holdDist", holdDist);
+    ini.Set("sf", "gyroRpmCap", gyroRpmCap);
+    ini.Set("sf", "brakeFrac", brakeFrac);
+    ini.Set("sf", "cornerLen", cornerLen);
+    ini.Set("sf", "gyroGain", gyroGain);
+    ini.Set("sf", "gyroDamp", gyroDamp);
+    ini.Set("sf", "cruiseAttitude", cruiseAttitude);
+    ini.Set("sf", "dockClearCheck", dockClearCheck);
+    ini.Set("sf", "cameraTag", cameraTag);
+    ini.Set("sf", "dockBlockSec", dockBlockSec);
 }
 void LoadConfig()
 {
     var ini = new MyIni();
     if (!ini.TryParse(Me.CustomData)) return;
-    string roleStr = ini.Get("shuttle", "role").ToString("shuttle").Trim().ToLowerInvariant();
+    MigrateLegacyConfig(ini);
+    string roleStr = ini.Get("sf", "role").ToString("shuttle").Trim().ToLowerInvariant();
     role = (roleStr == "base" || roleStr == "station") ? Role.Base : Role.Shuttle;
-    shipName = ini.Get("shuttle", "shipName").ToString(shipName);
-    channel = ini.Get("shuttle", "channel").ToString(channel);
-    string modeStr = ini.Get("shuttle", "runMode").ToString("CONTINUOUS").Trim().ToUpperInvariant();
+    shipName = ini.Get("sf", "shipName").ToString(shipName);
+    channel = ini.Get("sf", "channel").ToString(channel);
+    string modeStr = ini.Get("sf", "runMode").ToString("CONTINUOUS").Trim().ToUpperInvariant();
     string defHome = "Auto";
     if (modeStr == "WAITFULL") { runMode = RunMode.Continuous; defHome = "Cargo"; }
     else SetModeSilent(modeStr);
-    homeTrigger = TrigFromString(ini.Get("shuttle", "homeTrigger").ToString(defHome));
-    destTrigger = TrigFromString(ini.Get("shuttle", "destTrigger").ToString("Auto"));
-    remoteName = ini.Get("shuttle", "remoteName").ToString("");
-    loadTag = ini.Get("shuttle", "loadTag").ToString(ini.Get("shuttle", "loadSorter").ToString(loadTag));
-    unloadTag = ini.Get("shuttle", "unloadTag").ToString(ini.Get("shuttle", "unloadSorter").ToString(unloadTag));
-    lcdTag = ini.Get("shuttle", "lcdTag").ToString(lcdTag);
-    cruiseSpeed = (float)ini.Get("shuttle", "cruiseSpeed").ToDouble(cruiseSpeed);
-    dockSpeed = (float)ini.Get("shuttle", "dockSpeed").ToDouble(dockSpeed);
-    maxMassKg = ini.Get("shuttle", "maxMassKg").ToDouble(maxMassKg);
-    departFill = ini.Get("shuttle", "departFill").ToDouble(departFill);
-    unloadDrainSec = ini.Get("shuttle", "unloadDrainSec").ToDouble(unloadDrainSec);
-    dwellSec = ini.Get("shuttle", "dwellSec").ToDouble(dwellSec);
-    minHydrogenPct = Clamp(ini.Get("shuttle", "minHydrogenPct").ToDouble(minHydrogenPct), 0, 100);
-    minBatteryPct = Clamp(ini.Get("shuttle", "minBatteryPct").ToDouble(minBatteryPct), 0, 100);
-    fuelMarginPct = Math.Max(0, ini.Get("shuttle", "fuelMarginPct").ToDouble(fuelMarginPct));
-    segMeters = ini.Get("shuttle", "segMeters").ToDouble(segMeters);
-    turnDegrees = ini.Get("shuttle", "turnDegrees").ToDouble(turnDegrees);
-    simplifyMeters = ini.Get("shuttle", "simplifyMeters").ToDouble(simplifyMeters);
-    approachDist = ini.Get("shuttle", "approachDist").ToDouble(approachDist);
-    holdDist = Math.Max(approachDist + 5, ini.Get("shuttle", "holdDist").ToDouble(holdDist));
-    gyroRpmCap = (float)ini.Get("shuttle", "gyroRpmCap").ToDouble(gyroRpmCap);
-    brakeFrac = Clamp(ini.Get("shuttle", "brakeFrac").ToDouble(brakeFrac), 0.1, 1.0);
-    cornerLen = Math.Max(1.0, ini.Get("shuttle", "cornerLen").ToDouble(cornerLen));
-    gyroGain = Math.Max(0.1, ini.Get("shuttle", "gyroGain").ToDouble(gyroGain));
-    gyroDamp = Math.Max(0.0, ini.Get("shuttle", "gyroDamp").ToDouble(gyroDamp));
-    string attStr = ini.Get("shuttle", "cruiseAttitude").ToString(cruiseAttitude).Trim().ToLowerInvariant();
+    homeTrigger = TrigFromString(ini.Get("sf", "homeTrigger").ToString(defHome));
+    destTrigger = TrigFromString(ini.Get("sf", "destTrigger").ToString("Auto"));
+    remoteName = ini.Get("sf", "remoteName").ToString("");
+    loadTag = ini.Get("sf", "loadTag").ToString(ini.Get("sf", "loadSorter").ToString(loadTag));
+    unloadTag = ini.Get("sf", "unloadTag").ToString(ini.Get("sf", "unloadSorter").ToString(unloadTag));
+    lcdTag = ini.Get("sf", "lcdTag").ToString(lcdTag);
+    cruiseSpeed = (float)ini.Get("sf", "cruiseSpeed").ToDouble(cruiseSpeed);
+    dockSpeed = (float)ini.Get("sf", "dockSpeed").ToDouble(dockSpeed);
+    maxMassKg = ini.Get("sf", "maxMassKg").ToDouble(maxMassKg);
+    departFill = ini.Get("sf", "departFill").ToDouble(departFill);
+    unloadDrainSec = ini.Get("sf", "unloadDrainSec").ToDouble(unloadDrainSec);
+    dwellSec = ini.Get("sf", "dwellSec").ToDouble(dwellSec);
+    minHydrogenPct = Clamp(ini.Get("sf", "minHydrogenPct").ToDouble(minHydrogenPct), 0, 100);
+    minBatteryPct = Clamp(ini.Get("sf", "minBatteryPct").ToDouble(minBatteryPct), 0, 100);
+    fuelMarginPct = Math.Max(0, ini.Get("sf", "fuelMarginPct").ToDouble(fuelMarginPct));
+    segMeters = ini.Get("sf", "segMeters").ToDouble(segMeters);
+    turnDegrees = ini.Get("sf", "turnDegrees").ToDouble(turnDegrees);
+    simplifyMeters = ini.Get("sf", "simplifyMeters").ToDouble(simplifyMeters);
+    approachDist = ini.Get("sf", "approachDist").ToDouble(approachDist);
+    holdDist = Math.Max(approachDist + 5, ini.Get("sf", "holdDist").ToDouble(holdDist));
+    gyroRpmCap = (float)ini.Get("sf", "gyroRpmCap").ToDouble(gyroRpmCap);
+    brakeFrac = Clamp(ini.Get("sf", "brakeFrac").ToDouble(brakeFrac), 0.1, 1.0);
+    cornerLen = Math.Max(1.0, ini.Get("sf", "cornerLen").ToDouble(cornerLen));
+    gyroGain = Math.Max(0.1, ini.Get("sf", "gyroGain").ToDouble(gyroGain));
+    gyroDamp = Math.Max(0.0, ini.Get("sf", "gyroDamp").ToDouble(gyroDamp));
+    string attStr = ini.Get("sf", "cruiseAttitude").ToString(cruiseAttitude).Trim().ToLowerInvariant();
     cruiseAttitude = (attStr == "level" || attStr == "nose") ? attStr : "auto";
-    dockClearCheck = ini.Get("shuttle", "dockClearCheck").ToBoolean(dockClearCheck);
-    cameraTag = ini.Get("shuttle", "cameraTag").ToString(cameraTag);
-    dockBlockSec = Math.Max(0, ini.Get("shuttle", "dockBlockSec").ToDouble(dockBlockSec));
+    dockClearCheck = ini.Get("sf", "dockClearCheck").ToBoolean(dockClearCheck);
+    cameraTag = ini.Get("sf", "cameraTag").ToString(cameraTag);
+    dockBlockSec = Math.Max(0, ini.Get("sf", "dockBlockSec").ToDouble(dockBlockSec));
 }
 void SetModeSilent(string m)
 {
@@ -2170,6 +2175,15 @@ void LoadRoute()
     if (active == "") { haveRoute = false; activeRoute = ""; return; }
     activeRoute = active;
     LoadRouteInto(ini, active);
+}
+void MigrateLegacyConfig(MyIni ini)
+{
+    if (!ini.ContainsSection("shuttle") || ini.ContainsSection("sf")) return;
+    var keys = new List<MyIniKey>();
+    ini.GetKeys("shuttle", keys);
+    foreach (var k in keys) ini.Set("sf", k.Name, ini.Get(k).ToString(""));
+    ini.DeleteSection("shuttle");
+    Me.CustomData = ini.ToString();
 }
 void MigrateLegacyRoute(MyIni ini)
 {
