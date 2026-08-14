@@ -1,4 +1,4 @@
-const string VERSION = "0.3.0";
+const string VERSION = "0.4.0";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -137,6 +137,7 @@ Dictionary<PhaseId, FlightPhase> phases;
 bool operating = false;
 string statusMsg = "Idle";
 double phaseTimer = 0;
+double lastAlignErr = 0;
 bool departRequested = false;
 double estHydroOut = 0, estBattOut = 0;
 double estHydroHome = 0, estBattHome = 0;
@@ -152,7 +153,7 @@ bool cruiseFlyLevel = false;
 bool gyroResting = false;
 double dockBlockTimer = 0;
 double dockClearFor = 0;
-const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip";
+const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
 int menuPage = PAGE_MAIN;
 int menuIndex = 0;
@@ -944,6 +945,7 @@ double AlignTo(Vector3D targetFwd, Vector3D targetUp, double maxRad, bool coastH
     }
     Vector3D err = fErr + uErr;
     double attErr = fErr.Length() + uErr.Length();
+    lastAlignErr = attErr;
     Vector3D angVel = rc.GetShipVelocities().AngularVelocity;
     if (coastHold)
     {
@@ -1219,6 +1221,7 @@ string NormalizeView(string v)
         case VIEW_MENU:   return VIEW_MENU;
         case VIEW_STATUS: return VIEW_STATUS;
         case VIEW_TRIP:   return VIEW_TRIP;
+        case VIEW_TELEM:  return VIEW_TELEM;
         default:          return VIEW_FULL;
     }
 }
@@ -1623,6 +1626,7 @@ string BuildView(string view)
         case VIEW_MENU:   return BuildMenu();
         case VIEW_STATUS: return BuildStatus();
         case VIEW_TRIP:   return BuildTrip();
+        case VIEW_TELEM:  return BuildTelem();
         default:          return BuildHeader() + BuildMenu();
     }
 }
@@ -1680,6 +1684,46 @@ string BuildTrip()
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg);
+    return sb.ToString();
+}
+string BuildTelem()
+{
+    var sb = new StringBuilder();
+    sb.Append("-- Telemetry --\n");
+    if (rc == null) { sb.Append("no remote control"); return sb.ToString(); }
+    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
+    Vector3D grav = rc.GetNaturalGravity();
+    double gMag = grav.Length();
+    double spd = rc.GetShipSpeed();
+    sb.Append(ShipState()).Append(operating ? " [RUN]" : " [STOP]")
+      .Append("  t=").Append(phaseTimer.ToString("0.0")).Append("s\n");
+    sb.Append("Spd ").Append(spd.ToString("0.0")).Append("m/s");
+    if (cruiseArmed && cruiseIdx < legVmax.Count)
+        sb.Append(" /").Append(legVmax[cruiseIdx].ToString("0")).Append("cap");
+    sb.Append('\n');
+    if (gMag > 1e-3)
+    {
+        Vector3D up = -grav / gMag;
+        double vrate = vel.Dot(up);
+        sb.Append("VS  ").Append(vrate >= 0 ? "+" : "").Append(vrate.ToString("0.0")).Append("m/s\n");
+    }
+    else sb.Append("VS  (space)\n");
+    sb.Append("Grav ").Append(gMag.ToString("0.00")).Append("m/s2 ")
+      .Append((gMag / 9.81).ToString("0.00")).Append("g\n");
+    double surf;
+    if (rc.TryGetPlanetElevation(MyPlanetElevation.Surface, out surf))
+        sb.Append("Alt ").Append(surf.ToString("0")).Append("m\n");
+    else
+        sb.Append("Alt --\n");
+    if (cruiseArmed && legWps.Count > 0)
+        sb.Append("WP ").Append(cruiseIdx + 1).Append('/').Append(legWps.Count)
+          .Append("  ").Append((RemainingDistance() / 1000.0).ToString("0.00")).Append("km\n");
+    else
+        sb.Append("WP --\n");
+    sb.Append("Att ").Append((lastAlignErr * 57.2958).ToString("0.0")).Append("deg\n");
+    double h2 = HydrogenPct(), batt = BatteryPct();
+    sb.Append("H2 ").Append(h2 < 0 ? "n/a" : h2.ToString("0") + "%")
+      .Append("  Bat ").Append(batt < 0 ? "n/a" : batt.ToString("0") + "%");
     return sb.ToString();
 }
 string ShipState()

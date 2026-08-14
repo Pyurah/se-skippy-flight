@@ -159,7 +159,7 @@ interactive menu. If that's too crowded (e.g. a cockpit with several screens), y
 each screen a *different* view. Each screen also **sizes its font to its own content**, so a
 small screen no longer shrinks a big wall LCD.
 
-Four views:
+Five views:
 
 | View | Shows |
 |---|---|
@@ -167,11 +167,12 @@ Four views:
 | `menu` | Just the interactive menu — the screen you drive from (no status header; pair it with a `status` screen) |
 | `status` | Compact block: `-- Status --` / `<State> [RUN\|STOP]` / *(blank)* / `-- Cargo --` / `<fill>%  <mass>t  <speed>m/s` |
 | `trip` | Route, current phase, ETA + distance while cruising, and the transient status line (delivered / holding at destination / holding at home / fuel-hold) |
+| `telem` | **Debug telemetry** — phase + time-in-phase, speed vs the governor's cap, vertical rate, surface altitude, gravity magnitude (m/s² and g), waypoint `i/N` + remaining distance, attitude error (deg), and H2/battery. Assign it to a spare cockpit screen for diagnosing climb/cruise/descent and attitude behavior; it never appears anywhere you don't point it at, so the main info screen stays clean |
 
 Assign a view two ways:
 
 - **Standalone LCD — name tag.** Append `:view` to the base tag in the panel's name:
-  `[SHUTTLE:trip]`, `[SHUTTLE:menu]`, `[SHUTTLE:status]`. A bare `[SHUTTLE]` stays `full`.
+  `[SHUTTLE:trip]`, `[SHUTTLE:menu]`, `[SHUTTLE:status]`, `[SHUTTLE:telem]`. A bare `[SHUTTLE]` stays `full`.
 - **Cockpit / multi-surface block — Custom Data.** Add an opt-in `[shuttle-screens]` section
   to the block's Custom Data mapping each surface index to a view:
 
@@ -179,7 +180,7 @@ Assign a view two ways:
   [shuttle-screens]
   0 = menu
   1 = trip
-  2 = status
+  2 = telem
   ```
 
   Surface indices are the same ones the game numbers the block's screens with. This is the

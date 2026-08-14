@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.3.0";
+const string VERSION = "0.4.0";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -250,6 +250,7 @@ Dictionary<PhaseId, FlightPhase> phases;   // one instance per phase, built in P
 bool operating = false;          // set by START, cleared by STOP / OneTrip end
 string statusMsg = "Idle";
 double phaseTimer = 0;           // seconds spent in the current timed phase
+double lastAlignErr = 0;         // last attitude error from AlignTo (rad-ish); surfaced on the telem view for stall diagnosis
 bool departRequested = false;    // manual "Depart Now" latch (ship button / station IGC); consumed on departure
 
 // ---- Fuel / charge gate ----------------------------------------------------
@@ -285,7 +286,7 @@ double dockClearFor = 0;                          // s the corridor has read cle
 // looks exactly as before. A screen picks its view by name tag ([SHUTTLE:trip])
 // or, for a multi-surface block like a cockpit, a [shuttle-screens] section in
 // that block's Custom Data (see ParseScreenTag / Discover).
-const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip";
+const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 
 // ---- LCD menu (ship role) --------------------------------------------------
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
@@ -1398,6 +1399,7 @@ double AlignTo(Vector3D targetFwd, Vector3D targetUp, double maxRad, bool coastH
     }
     Vector3D err = fErr + uErr;   // combined world-space rotation axis * angle
     double attErr = fErr.Length() + uErr.Length();
+    lastAlignErr = attErr;        // latch for the telem view (attitude-stall diagnosis)
 
     Vector3D angVel = rc.GetShipVelocities().AngularVelocity;   // world rad/s
 
@@ -1830,6 +1832,7 @@ string NormalizeView(string v)
         case VIEW_MENU:   return VIEW_MENU;
         case VIEW_STATUS: return VIEW_STATUS;
         case VIEW_TRIP:   return VIEW_TRIP;
+        case VIEW_TELEM:  return VIEW_TELEM;
         default:          return VIEW_FULL;
     }
 }
@@ -2332,6 +2335,7 @@ string BuildView(string view)
         case VIEW_MENU:   return BuildMenu();
         case VIEW_STATUS: return BuildStatus();
         case VIEW_TRIP:   return BuildTrip();
+        case VIEW_TELEM:  return BuildTelem();
         default:          return BuildHeader() + BuildMenu();   // full
     }
 }
@@ -2400,6 +2404,70 @@ string BuildTrip()
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg);
+    return sb.ToString();
+}
+
+// Debug telemetry view: the flight-law signals that explain a bad climb, cruise, or
+// descent - phase timer, speed vs the governor cap, vertical rate, altitude, the
+// gravity magnitude that drives the atmo<->space handoff, waypoint progress, attitude
+// error, and fuel. It is opt-in by assignment: point a dedicated surface at it (a panel
+// named [SHUTTLE:telem], or a cockpit's [shuttle-screens] "0 = telem") and it never
+// touches the main info screen.
+string BuildTelem()
+{
+    var sb = new StringBuilder();
+    sb.Append("-- Telemetry --\n");
+    if (rc == null) { sb.Append("no remote control"); return sb.ToString(); }
+
+    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
+    Vector3D grav = rc.GetNaturalGravity();
+    double gMag = grav.Length();
+    double spd = rc.GetShipSpeed();
+
+    // Phase + time-in-phase (with leg direction) and run flag.
+    sb.Append(ShipState()).Append(operating ? " [RUN]" : " [STOP]")
+      .Append("  t=").Append(phaseTimer.ToString("0.0")).Append("s\n");
+
+    // Speed vs the governor's cap at the current waypoint (cap shown only while cruising).
+    sb.Append("Spd ").Append(spd.ToString("0.0")).Append("m/s");
+    if (cruiseArmed && cruiseIdx < legVmax.Count)
+        sb.Append(" /").Append(legVmax[cruiseIdx].ToString("0")).Append("cap");
+    sb.Append('\n');
+
+    // Vertical rate along gravity-up (climb +, descent -); blank in space.
+    if (gMag > 1e-3)
+    {
+        Vector3D up = -grav / gMag;
+        double vrate = vel.Dot(up);
+        sb.Append("VS  ").Append(vrate >= 0 ? "+" : "").Append(vrate.ToString("0.0")).Append("m/s\n");
+    }
+    else sb.Append("VS  (space)\n");
+
+    // Gravity magnitude - the atmo<->space boundary the flight law pivots on.
+    sb.Append("Grav ").Append(gMag.ToString("0.00")).Append("m/s2 ")
+      .Append((gMag / 9.81).ToString("0.00")).Append("g\n");
+
+    // Surface altitude where a planet is beneath us.
+    double surf;
+    if (rc.TryGetPlanetElevation(MyPlanetElevation.Surface, out surf))
+        sb.Append("Alt ").Append(surf.ToString("0")).Append("m\n");
+    else
+        sb.Append("Alt --\n");
+
+    // Waypoint progress + straight-line remaining distance.
+    if (cruiseArmed && legWps.Count > 0)
+        sb.Append("WP ").Append(cruiseIdx + 1).Append('/').Append(legWps.Count)
+          .Append("  ").Append((RemainingDistance() / 1000.0).ToString("0.00")).Append("km\n");
+    else
+        sb.Append("WP --\n");
+
+    // Attitude error (approx deg) - a value stuck high flags an align stall.
+    sb.Append("Att ").Append((lastAlignErr * 57.2958).ToString("0.0")).Append("deg\n");
+
+    // Fuel reserves (n/a when the ship carries none of that resource).
+    double h2 = HydrogenPct(), batt = BatteryPct();
+    sb.Append("H2 ").Append(h2 < 0 ? "n/a" : h2.ToString("0") + "%")
+      .Append("  Bat ").Append(batt < 0 ? "n/a" : batt.ToString("0") + "%");
     return sb.ToString();
 }
 

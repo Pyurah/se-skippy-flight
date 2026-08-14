@@ -7,8 +7,9 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.3.0 (Slice a delivered — phase-object base controller; behavior identical to
-  Skippy-Shuttle v0.15.0. Plus multiple named routes with a menu switcher — see Delivered extras)
+- **Version:** 0.4.0 (Slice a delivered — phase-object base controller; behavior identical to
+  Skippy-Shuttle v0.15.0. Plus multiple named routes with a menu switcher, and a telemetry
+  debug view — see Delivered extras)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
@@ -246,6 +247,14 @@ The control tower (pad registry, clearance grants, slot scheduling) as its own s
   section migrates once to `[route.Main]`. This is distinct from "multi-stop routes" above — it is
   *many two-pose routes*, selectable, not one route with many stops. Stripped size after: 81,378
   chars (18,622 headroom).
+- **Telemetry debug view (0.4.0).** A `telem` screen view surfacing live flight-law signals
+  (phase + time-in-phase, speed vs governor cap, vertical rate, surface altitude, gravity
+  magnitude, waypoint `i/N` + remaining distance, attitude error, H2/battery). Opt-in by
+  assignment — a panel named `[SHUTTLE:telem]` or a cockpit `[shuttle-screens]` entry `0 = telem`
+  — so it never crowds the main info screen. `AlignTo` now latches `lastAlignErr` for the view,
+  making an attitude stall visible live. Groundwork for Slice d's environment sensing (it already
+  reads `TryGetPlanetElevation` and gravity magnitude). Stripped size after: 83,473 chars
+  (16,527 headroom).
 
 ---
 

@@ -4,6 +4,26 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-14
+
+### Added
+- **Telemetry debug view (`telem`).** A new screen view that surfaces the flight-law
+  signals behind a climb/cruise/descent problem: current phase + time-in-phase, ship speed
+  vs. the governor's cap at the active waypoint, vertical rate (climb/descent) along
+  gravity-up, surface altitude, gravity magnitude (the atmo↔space boundary the flight law
+  pivots on) in both m/s² and g, waypoint progress `i/N` with straight-line remaining
+  distance, attitude error in degrees, and H2/battery reserves.
+- The view is **opt-in by assignment** — it appears only on a surface you point at it, so it
+  never crowds the main info screen. Assign it like any other view: name a panel
+  `[SHUTTLE:telem]`, or add `0 = telem` (any surface index) under a cockpit's
+  `[shuttle-screens]` Custom Data section.
+- `lastAlignErr` is latched in `AlignTo` and shown on the telem view, so an attitude stall
+  (the class of bug behind the historical 45-second undock hang) is visible live on a panel.
+
+### Notes
+- Stripped deploy size: 83,473 chars (16,527 under the 100,000 PB limit; +2,095 vs 0.3.0).
+  Braces balanced (407/407). Version constant bumped to 0.4.0.
+
 ## [0.3.0] - 2026-08-14
 
 ### Added
