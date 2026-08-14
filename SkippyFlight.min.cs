@@ -1,4 +1,4 @@
-const string VERSION = "0.4.0";
+const string VERSION = "0.4.1";
 enum Role { Shuttle, Base }
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
@@ -646,8 +646,16 @@ void TickUndock()
             else
             {
                 faceFwd = dir;
-                Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
-                if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+                if (grav.LengthSquared() > 1e-3)
+                {
+                    Vector3D up = -grav;
+                    Vector3D perp = up - up.Dot(dir) * dir;
+                    faceUp = perp.LengthSquared() > 1e-6 ? Vector3D.Normalize(perp) : rc.WorldMatrix.Up;
+                }
+                else
+                {
+                    faceUp = rc.WorldMatrix.Up;
+                }
             }
         }
     }

@@ -4,6 +4,26 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-08-14
+
+### Fixed
+- Undock from a **space** dock no longer swings back and forth for ~45 s before committing
+  to cruise. In space, cruise is roll-agnostic — it holds the ship's *current* up
+  (`RunCruiseControl`, the space branch) — but undock was aligning to the recorded dock's
+  up, which for a space station is essentially arbitrary (no gravity to define it). The
+  gyros hunted a roll cruise never wanted, so `AlignTo` never fell under `ALIGN_TOL` and the
+  undock only advanced when the 45 s watchdog fired. Undock now pre-aims the *exact* attitude
+  cruise will hold: current up in space (zero roll demand — alignment only has to point the
+  nose), and gravity-up orthogonalized to the heading for an up-thrust-poor craft still in
+  air. The telemetry view's `Att` line (added in 0.4.0) surfaced this directly: attitude
+  error pinned at ~80-89° with speed 0 m/s and gravity 0 while the phase timer climbed.
+- The v0.2.1 fix (orthogonalized dock up) only addressed the in-gravity/hill case, where the
+  recorded dock up ≈ gravity-up ≈ what cruise holds, so it happened to match; that equivalence
+  breaks in space. This replaces it with a direct match to cruise's attitude law for both cases.
+
+### Notes
+- Bug fix only; no new behavior. Version constant bumped to 0.4.1.
+
 ## [0.4.0] - 2026-08-14
 
 ### Added

@@ -44,7 +44,7 @@
  * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.4.0";
+const string VERSION = "0.4.1";
 
 // ---- Roles / states --------------------------------------------------------
 enum Role { Shuttle, Base }
@@ -941,14 +941,27 @@ void TickUndock()
             }
             else
             {
-                // Nose-forward flight (space, or up-thrust-poor craft): face the target
-                // directly, but keep the target up perpendicular to the (possibly
-                // pitched) facing. Pairing a pitched forward with the near-vertical
-                // recorded dock up is a pose the gyros can't satisfy, so AlignTo would
-                // never fall under ALIGN_TOL and undock would stall to the 45s timeout.
+                // Nose-forward flight (space, or up-thrust-poor craft): pre-aim the EXACT
+                // attitude cruise will hold (see RunCruiseControl), so the handoff is
+                // seamless and AlignTo has a reachable target. The trap is roll: in space
+                // cruise is roll-agnostic - it holds the ship's CURRENT up - so demanding a
+                // specific roll here is a constraint cruise never wants. A space station's
+                // recorded dock up is essentially arbitrary (no gravity to define it), so
+                // aiming for it made the gyros hunt a roll that never mattered: AlignTo never
+                // fell under ALIGN_TOL and undock swung for the full 45s watchdog before
+                // committing. Match cruise instead - hold current up in space; use gravity-up
+                // (orthogonalised to the heading) for an up-thrust-poor craft still in air.
                 faceFwd = dir;
-                Vector3D u = p.Up - p.Up.Dot(faceFwd) * faceFwd;
-                if (u.LengthSquared() > 1e-6) faceUp = Vector3D.Normalize(u);
+                if (grav.LengthSquared() > 1e-3)
+                {
+                    Vector3D up = -grav;
+                    Vector3D perp = up - up.Dot(dir) * dir;
+                    faceUp = perp.LengthSquared() > 1e-6 ? Vector3D.Normalize(perp) : rc.WorldMatrix.Up;
+                }
+                else
+                {
+                    faceUp = rc.WorldMatrix.Up;   // space: cruise coasts on the current up - demand no roll
+                }
             }
         }
     }

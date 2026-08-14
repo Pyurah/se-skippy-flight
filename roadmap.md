@@ -7,9 +7,9 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** 0.4.0 (Slice a delivered — phase-object base controller; behavior identical to
+- **Version:** 0.4.1 (Slice a delivered — phase-object base controller; behavior identical to
   Skippy-Shuttle v0.15.0. Plus multiple named routes with a menu switcher, and a telemetry
-  debug view — see Delivered extras)
+  debug view — see Delivered extras. 0.4.1 fixes the space-undock attitude swing.)
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
