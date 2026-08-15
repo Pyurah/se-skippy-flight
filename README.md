@@ -12,8 +12,11 @@ planet, entering one, hopping between planet docks, or staying in space, and sta
 accordingly (see **Flight scenarios** below). A separate control tower for traffic management is
 being built out slice by slice — see [roadmap.md](roadmap.md).
 
-- **One file, two roles.** Paste the same script into the ship PB *and* the base PB. The
-  role is chosen in Custom Data (`role = shuttle` or `role = base`).
+- **Flight-only, tower-optional.** Paste this script into the ship PB — it flies the whole route on
+  its own. For a status board or an active traffic-control tower, run the companion
+  [`SkippyTower.cs`](SkippyTower.cs) on a station PB (`towerMode = board` renders the fleet board — a
+  drop-in for the old `role = base`; `towerMode = control` serializes arrivals). SkippyTower also has a
+  ship-side **teach mode** for recording holding zones and interior pad paths (see below).
 - **Teach a route by flying it.** Dock, `RECORD HOME`, fly the route by hand, dock, `RECORD DEST`.
   The route is saved as copy-pasteable text so you can share it across a fleet.
 - **Orientation-matched, ship-agnostic docking.** Recording captures the full docked pose —
@@ -29,7 +32,8 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
   leg burns effectively **no fuel**.
 - **Cargo-aware.** Toggles your load/unload sorters and enforces a mass gate so the ship
   never departs overweight.
-- **Live status + ETA.** Ship LCDs show state/ETA; the shuttle broadcasts to base screens.
+- **Live status + ETA.** Ship LCDs show state/ETA; the shuttle broadcasts its status so a
+  `SkippyTower` board (or control tower) can render the whole fleet.
   Split the display across cockpit screens — menu on one, trip info on another, a compact
   status on a third — each sized to its own content (see **Screen views** below).
 
@@ -40,13 +44,15 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 1. Paste [`SkippyFlight.min.cs`](SkippyFlight.min.cs) into the ship's Programmable Block and
    recompile. On first run it writes a config template into the PB's **Custom Data**.
 2. Edit the Custom Data (see below), then recompile again.
-3. Repeat for the base/station PB, but set `role = base`.
+3. For a fleet status board or an active control tower, paste
+   [`SkippyTower.min.cs`](SkippyTower.min.cs) into a station PB and set `towerMode = board` (passive
+   board) or `control` (active tower). See [Control tower](#control-tower-skippytowercs).
 
 > **Paste the `.min.cs`, not the `.cs`.** The fully commented source
-> [`SkippyFlight.cs`](SkippyFlight.cs) is **165,569 chars** — over the 100,000-char PB limit —
-> so it won't compile in-game as-is. `python tools/build-min.py` generates
+> [`SkippyFlight.cs`](SkippyFlight.cs) is well over the 100,000-char PB limit, so it won't compile
+> in-game as-is. `python tools/build-min.py` generates
 > [`SkippyFlight.min.cs`](SkippyFlight.min.cs): the same code with comments and blank lines
-> stripped (~44 % smaller → **93,437 chars**, ~6.5 k under the cap). Keep editing
+> stripped (~47 % smaller → **97,824 chars**, ~2 k under the cap). Keep editing
 > `SkippyFlight.cs`; the min file is a generated artifact, rebuilt on every change. (In-game
 > compile errors then report line numbers against the min file, not the source.)
 
@@ -54,9 +60,8 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `role` | `shuttle` | `shuttle` (flies) or `base` / `station` (renders the board) |
-| `shipName` | `Skippy` | Label shown on the base board |
-| `channel` | `SkippyShuttleNet` | IGC channel — **must match** on ship and base |
+| `shipName` | `Skippy` | Label shown on the tower/board |
+| `channel` | `SkippyShuttleNet` | IGC channel — **must match** on ship and tower |
 | `useTower` | `off` | `off` (default) flies independently; `auto` obeys an optional control tower — the ship requests clearance before undocking and before taxiing onto a connector, holding until granted. If no tower is broadcasting on the channel it stays independent, so `auto` is safe to leave on |
 | `runMode` | `CONTINUOUS` | Trip cycle: `CONTINUOUS`, `ONETRIP`, or `ONEWAY` (departure is a *separate* setting — see below) |
 | `homeTrigger` | `Auto` | What releases the shuttle **from home**: `Auto`, `Cargo`, `Timer`, `Manual` |
@@ -161,6 +166,7 @@ nothing to configure). While climbing or descending inside a gravity well the st
 |---|---|
 | `RECORD HOME [name]` | Bind the docked connector as home; start recording the path. `name` (optional) saves it as a named route — omit to re-record the active route (or `Main`) |
 | `RECORD DEST` | Bind the docked connector as destination; finish + save the route |
+| `RECORD ZONE` | Finish the route at a **tower holding zone** instead of a connector: while loitering in open space inside the zone, save the live pose as the destination (arrival = *inside the box*). For stations you don't own — see [Holding zones](#holding-zones--interior-pad-paths) |
 | `ROUTE [name]` | Switch the active route to a saved one (blocked while operating). No name = report the active route + saved count |
 | `DELROUTE <name>` | Delete a saved route; if it was active, fall back to another (or none) |
 | `START` / `GO` | Begin operating per the run mode |
@@ -201,7 +207,7 @@ interactive menu. If that's too crowded (e.g. a cockpit with several screens), y
 each screen a *different* view. Each screen also **sizes its font to its own content**, so a
 small screen no longer shrinks a big wall LCD.
 
-Five views:
+Four views:
 
 | View | Shows |
 |---|---|
@@ -209,12 +215,11 @@ Five views:
 | `menu` | Just the interactive menu — the screen you drive from (no status header; pair it with a `status` screen) |
 | `status` | Compact block: `-- Status --` / `<State> [RUN\|STOP]` / *(blank)* / `-- Cargo --` / `<fill>%  <mass>t  <speed>m/s` |
 | `trip` | Route, current phase, ETA + distance while cruising, and the transient status line (delivered / holding at destination / holding at home / fuel-hold) |
-| `telem` | **Debug telemetry** — phase + time-in-phase, speed vs the governor's cap, vertical rate, surface altitude, gravity magnitude (m/s² and g), waypoint `i/N` + remaining distance, attitude error (deg), and H2/battery. Assign it to a spare cockpit screen for diagnosing climb/cruise/descent and attitude behavior; it never appears anywhere you don't point it at, so the main info screen stays clean |
 
 Assign a view two ways:
 
 - **Standalone LCD — name tag.** Append `:view` to the base tag in the panel's name:
-  `[SF:trip]`, `[SF:menu]`, `[SF:status]`, `[SF:telem]`. A bare `[SF]` stays `full`.
+  `[SF:trip]`, `[SF:menu]`, `[SF:status]`. A bare `[SF]` stays `full`.
 - **Cockpit / multi-surface block — Custom Data.** Add an opt-in `[sf-screens]` section
   to the block's Custom Data mapping each surface index to a view:
 
@@ -222,7 +227,7 @@ Assign a view two ways:
   [sf-screens]
   0 = menu
   1 = trip
-  2 = telem
+  2 = status
   ```
 
   Surface indices are the same ones the game numbers the block's screens with. This is the
@@ -243,7 +248,7 @@ auto-fit subtracts the padding from the usable area, so padded text still fits.
 > LCD names) are read when the script discovers blocks, which happens on recompile. Change
 > the section, then recompile the PB to see the new layout.
 
-> Cockpit/ship screens only. The base/station board still shows its shuttle list; per-view
+> Cockpit/ship screens only. The station board (SkippyTower) still shows its shuttle list; per-view
 > station "marquees" are on the roadmap.
 
 ### Run modes vs. departure triggers
@@ -287,22 +292,14 @@ uses the floors alone. When it's gated it simply **holds at the dock** with a "l
 status and departs the moment the level is met — it never faults. A ship with no hydrogen tanks
 skips the hydrogen check; one with no batteries skips the charge check.
 
-## Base board
+## Fleet status board
 
-Set a base PB to `role = base` and the same `channel`. Tag base LCDs with `[SF]`
-(or your `lcdTag`). The board shows each shuttle's state, ETA, distance, cargo % and mass,
-and flags **NO SIGNAL** if a shuttle drops off the network (e.g. beyond antenna range).
-
-> `role = station` works too — it's an alias for `base`. Any other value (or a blank
-> role) runs the block as a **shuttle**, so if your board isn't showing the fleet, check
-> the role is exactly `base` or `station`. A board reads only `role`, `shipName`,
-> `channel`, and `lcdTag`; on compile it trims the other (flight/cargo) keys out of its
-> Custom Data, so a block you switched from shuttle to base cleans itself up.
-
-The base PB also accepts a `DEPART` run-argument: `DEPART` releases every shuttle on the channel
-that's holding at a dock, and `DEPART <shipName>` targets just one. So a station can send a
-waiting shuttle on its way without anyone touching the ship — provided the two are in antenna
-range of each other (see the range note above).
+A status board is no longer part of the ship script — run [`SkippyTower.cs`](SkippyTower.cs) on a
+station PB in **`towerMode = board`** for a passive board (a byte-for-byte drop-in for the old
+`role = base`), or `towerMode = control` for an active tower that also renders the board. Tag the
+station's LCDs with `[SF]` (or your `lcdTag`). The board shows each shuttle's state, ETA, distance,
+cargo % and mass, and flags **NO SIGNAL** if a shuttle drops off the network (e.g. beyond antenna
+range). See [Control tower](#control-tower-skippytowercs) below.
 
 > If your route is longer than the antenna's broadcast range, the board blanks to **NO SIGNAL**
 > while the shuttle is out of range. Place a relay antenna near the midpoint for an unbroken
@@ -312,8 +309,9 @@ range of each other (see the range note above).
 
 For a station with more than one shuttle, `SkippyTower.cs` is a **separate** script that actively
 serializes traffic so only one craft maneuvers at the station at a time — no more two shuttles both
-undocking into, or both taxiing onto, the same corridor. It is a superset of the base board: it
-renders the same status list and, in control mode, clears traffic on top.
+undocking into, or both taxiing onto, the same corridor. It renders the fleet status board and, in
+control mode, clears traffic on top. The **same script** also has a ship-side **teach mode** for
+recording holding zones and interior pad paths — see [Holding zones](#holding-zones--interior-pad-paths).
 
 **Install:** paste `SkippyTower.min.cs` into a station Programmable Block (its own block — not the
 same PB as a shuttle or a plain board), recompile once to seed the `[sf]` template, edit, recompile
@@ -325,8 +323,11 @@ obeys the tower; a shuttle left at `off` ignores it.
 | `channel` | `SkippyShuttleNet` | IGC channel; must match the fleet |
 | `zone` | `Main` | Label broadcast in the heartbeat (operator-facing; ships ignore the content) |
 | `lcdTag` | `[SF]` | Board is written to `Me`'s surface and every LCD whose name contains this tag |
-| `towerMode` | `control` | `control` = active tower (heartbeat + clearances); `board` = passive status board with **no heartbeat**, so the fleet stays independent (a drop-in for `role = base`) |
-| `grant` | `auto` | Control-mode sub-mode. `auto` = clear the best waiting craft automatically every tick; `manual` = hold all traffic until you approve each one by hand. Toggled at runtime (see commands below) and persisted here, so it survives a recompile. Ignored in `board` mode |
+| `towerMode` | `control` | `control` = active tower (heartbeat + clearances); `board` = passive status board with **no heartbeat**, so the fleet stays independent (a drop-in for `role = base`); `teach` = ship-side setup helper (see [Holding zones](#holding-zones--interior-pad-paths)) |
+| `grant` | `auto` | Control-mode sub-mode. `auto` = clear the best waiting craft automatically every tick; `manual` = hold all traffic until you approve each one by hand. Toggled at runtime (see commands below) and persisted here, so it survives a recompile. Ignored in `board`/`teach` mode |
+| `remoteName` | *(blank)* | **Teach mode only:** exact name of the ship's Remote Control to read; blank = first one found on the grid |
+| `teachSeg` | `2.5` | **Teach mode only:** interior-path breadcrumb spacing in metres (fine, because station walls are close) |
+| `teachTurn` | `12` | **Teach mode only:** drop an extra breadcrumb when the heading changes by this many degrees over a short move |
 
 **How clearance works:** the tower broadcasts a `CMD|TOWER` heartbeat; a shuttle running `useTower =
 auto` that hears it switches from independent to controlled and requests clearance before undocking
@@ -349,6 +350,7 @@ it to a button/sensor); they only act in `control` mode:
 | `CLEAR` | Approve the top of the queue (a landing before a departure, then oldest-first) |
 | `CLEAR <ship>` | Approve a specific waiting ship by name (queue-jump) |
 | `RELEASE` | Force-free the current slot now (deadlock breaker; skips the 180 s safety timeout) |
+| `PADFREE <name>` | Force-free a pad's occupancy (pad-bank deadlock breaker; see below) |
 
 The heartbeat keeps beating in both sub-modes, so a ship held for your approval stays controlled (it
 never reverts to independent while you deliberate); once you clear it and it departs or docks, the
@@ -358,6 +360,110 @@ slot frees automatically and the next craft waits for your next `CLEAR`. The boa
 
 > The tower keeps no saved state — its fleet list and clearance queue rebuild live from broadcasts,
 > so a recompile mid-traffic simply re-establishes from the next round of reports and requests.
+> (Registered pads are the one exception — they persist in `[pad.<name>]` Custom Data sections.)
+
+### Multiple grids on one channel (grid-scoped clearance)
+
+Clearance is bound to a **grid**. Each tower advertises its own construct's id in its heartbeat, and
+every ship names the grid of the dock it's heading to (or leaving) in each request. A ship only obeys —
+and only accepts clearance from — the tower on the grid it is actually arriving at or departing from.
+
+So you can run several independent stations on the **same channel** (even sitting close together, or
+next to a grid owned by someone else): each tower governs only its own traffic, and a tower can never
+gate or clear a ship bound for a different grid. Connector routes carry the dock's grid automatically
+(recorded by `RECORD HOME`/`RECORD DEST`); a holding-zone route picks up the governing grid when you
+`REGZONE` it. A tower or route from before this change (no grid id) falls back to the old accept-any
+behavior, so nothing breaks — re-record a route to enable scoping for it.
+
+### Pad bank (parking more than one ship)
+
+By default each shuttle docks at its **own recorded destination pose** — fine when every ship has its
+own dedicated connector. For a station with a **pool of interchangeable pads** and several shuttles,
+turn on the **pad bank**: the tower assigns a *free* pad to each arriving ship, so ships **park in
+parallel** while movement stays serialized (still only one craft maneuvers at a time). No more hovering
+and deadlocking behind a ship already parked on the one connector.
+
+**Register the pads (once):** pads are taught with SkippyTower running in **teach mode** on a PB aboard
+the ship (see [Holding zones](#holding-zones--interior-pad-paths) for the full setup). Dock the ship at a
+station pad and run `REGPAD <name>` in the **teach PB's** Run argument. It records the exact dock pose and
+pushes it to the station tower, which stores it as a `[pad.<name>]` section and lists it on the board
+(`<name>: free`). Repeat for each pad, giving each a single-word name (`REGPAD A`, `REGPAD B`, …). You only
+register each pad **once, with one ship** — the tower relays that pose to whichever ship it later assigns.
+
+> **Requires a geometrically uniform fleet.** A recorded pose is a specific ship's docked position and
+> attitude; relaying it to a *different* ship only seats correctly if the fleet's ships are dimensionally
+> identical (same connector-to-hull geometry) — as drones built to one spec are. Mixed hull sizes will
+> mis-seat. If you run non-uniform ships, don't register pads (leave the bank empty) and each ship docks
+> at its own recorded pose as before.
+
+**What happens then:** an arriving ship's landing clearance now needs both the corridor free **and** a
+free pad. The tower reserves a pad, relays its pose in the grant, and the ship flies that pad's approach.
+A pad stays occupied until its ship departs. If every pad is taken, further landings hold with
+`HOLD: no pad` (and a waiting departure is cleared first, since departing frees a pad). The board gains a
+**Pads** block listing each pad as `free` or the ship holding it. `PADFREE <name>` force-frees a pad
+whose ship vanished without departing cleanly.
+
+**Fully optional / backward compatible:** register no pads (or run no tower) and nothing changes — ships
+dock at their own recorded pose exactly as before.
+
+### Holding zones & interior pad paths
+
+The pad bank above assumes an **open-air dock** — a straight line from the outer approach fix to the pad
+is clear sky. But the hard case is a station you **don't own**: a hole-in-the-wall entrance and a bank of
+pads at varied angles *inside* the structure. A straight line from the outer fix to an interior pad punches
+through a wall. Holding zones split the trip into two ownership domains:
+
+```
+  ship-owned                              tower-owned (per assigned pad)
+  ─────────────────────────────────────  ──────────────────────────────
+  home → cruise breadcrumbs → HOLDING ZONE → interior path → PAD
+                                          (relayed on grant, chunked)
+```
+
+- The route's **destination is a tower-owned holding zone** — an oriented box in open space just outside
+  the entrance — not a connector. Arrival is satisfied by being **anywhere inside the box**, so a queue of
+  ships loiters spread out instead of fighting for one point.
+- Each pad stores a **recorded interior path** (holding-zone → pad), taught once and kept on the tower.
+- On landing clearance the tower assigns a free pad, relays its pose **and streams that pad's interior
+  path** to the ship. The ship flies straight to the path's first crumb (safe — open space just inside the
+  zone), then **follows the interior path at `dockSpeed`** to the pad and docks — on a pad and corridor it
+  never recorded itself.
+- On departure the tower re-streams the same path; the ship **reverses** it to thread back out to the zone,
+  then rejoins its recorded cruise route home. (v1 egress reuses the inbound path; there's no separate
+  takeoff corridor.)
+- **Manual fly-in:** because arrival is "inside the box," you can hand-fly a ship into the zone, hit
+  `START`, and it will request landing and auto-park via the relayed path — no recorded route needed.
+- **Fallback:** if no path is relayed (an owned open-air dock, or a legacy tower), taxi keeps the
+  straight-line behavior. Scenario 1 (recorded home ↔ dest) and the plain pad bank are untouched.
+
+**Teaching a station (SkippyTower teach mode).** Zones, pads, and interior paths are all recorded with a
+**second PB aboard the ship** running `SkippyTower.min.cs` with `towerMode = teach`. Teach mode is
+**listen-free and driver-free**: it never registers a listener, never beats a heartbeat, and never touches
+thrusters or gyros — it only reads the ship's Remote Control position to record breadcrumbs and pushes the
+results to the station's real tower over the fleet channel. That keeps your flight PB lean (flight
+automation only) and makes it safe to run alongside a live fleet.
+
+Set it up once: paste `SkippyTower.min.cs` into a spare PB on the ship, set `towerMode = teach` and matching
+`channel`, recompile. Optionally set `remoteName` if the ship has more than one Remote Control. Then, from
+that PB's Run argument:
+
+| Teach command | What it does |
+|---|---|
+| `REGZONE [w h d]` | Define the holding zone as a box centred on the ship's current position, `w`×`h`×`d` metres (default `20 20 20`), oriented to the ship. Pushes `CMD\|ZONE` to the tower; the tower advertises it in its heartbeat and persists it in a `[zone]` section |
+| `REGPATH <pad>` | Start recording an interior path for `<pad>`, seeded at the current position. Fly the ship in toward the pad; breadcrumbs drop as you move |
+| *(dock the ship)* | Docking the connector **auto-finalizes**: the recorded path is streamed to the tower as `CMD\|PADPATH` and the exact dock pose as `CMD\|PAD`. The pad now shows `<pad> … (Nwp)` on the board |
+| `REGPATH END` | Finish a path manually without docking (streams what's recorded so far) |
+| `REGPATH CANCEL` | Discard the in-progress recording |
+| `REGPAD <pad>` | Register just the dock pose for `<pad>` (no interior path) — the same open-air pad registration as the pad bank, issued from the teach PB while docked |
+
+Breadcrumb density is tuned by `teachSeg` (metres between crumbs, default `2.5` — fine, since station walls
+are close) and `teachTurn` (drop an extra crumb when the heading swings this many degrees, default `12`).
+The teach PB writes a status board to its own screen and any `[SF]`-tagged panel so you can watch the
+recording. Everything it teaches lands in the **station** tower's Custom Data (`[zone]`, `[pad.*]` with a
+`path=` key) and survives a recompile there.
+
+**Fully optional:** no zone taught and no path streamed → ships behave exactly as the plain pad bank (or
+single-pose docking) above. You only need teach mode for stations you don't own.
 
 ## Limitations (honest)
 

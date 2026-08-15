@@ -1,5 +1,4 @@
-const string VERSION = "0.10.0";
-enum Role { Shuttle, Base }
+const string VERSION = "0.12.0";
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
 struct DockPose
@@ -147,7 +146,6 @@ class FaultedPhase : FlightPhase
     public override string Label { get { return "FAULT"; } }
     public override void Tick(Program p) { p.TickFaulted(); }
 }
-Role role = Role.Shuttle;
 RunMode runMode = RunMode.Continuous;
 DepartTrigger homeTrigger = DepartTrigger.Auto;
 DepartTrigger destTrigger = DepartTrigger.Auto;
@@ -187,6 +185,7 @@ DockPose homePose, destPose;
 string homeConn = "", destConn = "";
 List<Vector3D> path = new List<Vector3D>();
 bool haveRoute = false;
+bool destZone = false;
 string activeRoute = "";
 string recordName = "";
 List<string> routeNames = new List<string>();
@@ -202,7 +201,6 @@ Dictionary<PhaseId, FlightPhase> phases;
 bool operating = false;
 string statusMsg = "Idle";
 double phaseTimer = 0;
-double lastAlignErr = 0;
 bool departRequested = false;
 double estHydroOut = 0, estBattOut = 0;
 double estHydroHome = 0, estBattHome = 0;
@@ -221,12 +219,24 @@ double dockClearFor = 0;
 double stageStableFor = 0;
 bool stagingAtFix = false;
 double towerAge = 9999;
+long towerGrid = 0;
 bool cleared = false;
 bool clearanceRequested = false;
 string reqAction = "";
 string holdReason = "";
 double reqTimer = 0;
-const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
+DockPose asgPose;
+bool asg = false;
+bool haveZone;
+Vector3D zoneCenter, zoneFwd, zoneUp, zoneExt;
+List<Vector3D> asgPath = new List<Vector3D>();
+List<Vector3D> asgPathRx = new List<Vector3D>();
+bool asgPathReady;
+bool interior;
+bool interiorDone;
+Vector3D loiterPos; bool haveLoiter;
+double zoneWait;
+const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip";
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
 int menuPage = PAGE_MAIN;
 int menuIndex = 0;
@@ -248,7 +258,6 @@ List<IMyGasTank> h2Tanks = new List<IMyGasTank>();
 List<IMyBatteryBlock> batteries = new List<IMyBatteryBlock>();
 List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
 IMyBroadcastListener listener;
-Dictionary<string, ShuttleReport> fleet = new Dictionary<string, ShuttleReport>();
 const double DT_FALLBACK = 1.0 / 6.0;
 double dt = DT_FALLBACK;
 double sinceRender = 0;
@@ -284,6 +293,7 @@ const double DOCK_MATCH_DIST = 10.0;
 const double CLEAR_CONE_DOT = 0.70;
 const double CLEAR_CONFIRM_SEC = 1.5;
 const double STAGE_CONFIRM_SEC = 1.5;
+const double PATH_WAIT_SEC = 4.0;
 const double CLEAR_RANGE_PAD = 5.0;
 const double CLEAR_LEGACY_MARGIN = 5.0;
 const double TOWER_TIMEOUT = 6.0;
@@ -309,17 +319,13 @@ Program()
     };
     if (string.IsNullOrWhiteSpace(Me.CustomData)) WriteConfigTemplate();
     LoadConfig();
-    if (role == Role.Shuttle) BackfillConfig();
-    else TrimBaseConfig();
+    BackfillConfig();
     Discover();
     LoadRoute();
     LoadState();
     listener = IGC.RegisterBroadcastListener(channel);
-    if (role == Role.Shuttle)
-    {
-        dampenersOwned = true;
-        ReleaseControl();
-    }
+    dampenersOwned = true;
+    ReleaseControl();
 }
 void Save()
 {
@@ -342,7 +348,6 @@ void Main(string argument, UpdateType source)
         dt = Runtime.TimeSinceLastRun.TotalSeconds;
         if (dt <= 0 || dt > 0.5) dt = DT_FALLBACK;
         if (!string.IsNullOrEmpty(argument)) HandleCommand(argument.Trim());
-        if (role == Role.Base) { RunBase(); return; }
         if (rc == null) { Discover(); if (rc == null) { statusMsg = "No Remote Control found"; RenderShip(); return; } }
         DrainIgc();
         towerAge += dt; reqTimer += dt;
@@ -370,6 +375,7 @@ void SwitchPhase(PhaseId next)
     phase = next;
     phases[phase].Enter(this);
     cleared = false; clearanceRequested = false; holdReason = ""; reqTimer = REQ_RESEND;
+    if (next == PhaseId.Undock) { interior = false; interiorDone = false; haveLoiter = false; zoneWait = 0; }
 }
 void TickFaulted()
 {
@@ -424,7 +430,8 @@ void HandleCommand(string arg)
         case "RECORD":
             if (parts.Length > 1 && parts[1] == "HOME") RecordHome(parts.Length > 2 ? raw[2] : "");
             else if (parts.Length > 1 && parts[1] == "DEST") RecordDest(parts.Length > 2 ? raw[2] : "");
-            else statusMsg = "Usage: RECORD HOME [name] | RECORD DEST";
+            else if (parts.Length > 1 && parts[1] == "ZONE") RecordZone();
+            else statusMsg = "Usage: RECORD HOME [name] | RECORD DEST | RECORD ZONE";
             break;
         case "START":
         case "GO":
@@ -490,13 +497,7 @@ void HandleCommand(string arg)
             else statusMsg = "Mode: " + runMode;
             break;
         case "DEPART":
-            if (role == Role.Base)
-            {
-                string who = parts.Length > 1 ? parts[1] : "*";
-                IGC.SendBroadcastMessage(channel, "CMD|DEPART|" + who);
-                statusMsg = "Sent DEPART to " + (who == "*" ? "all shuttles" : who);
-            }
-            else RequestDepart();
+            RequestDepart();
             break;
         case "RESUME":
             LoadState();
@@ -581,6 +582,28 @@ void RecordDest(string name = "")
     SaveRoute();
     statusMsg = "Saved '" + activeRoute + "': " + homeConn + " -> " + destConn + " (" + path.Count + "wp)";
 }
+void RecordZone()
+{
+    if (phase != PhaseId.Recording) { statusMsg = "RECORD ZONE: run RECORD HOME first"; return; }
+    destPose = new DockPose
+    {
+        Pos = rc.GetPosition(),
+        Fwd = rc.WorldMatrix.Forward,
+        Up = rc.WorldMatrix.Up,
+        ConnFwd = rc.WorldMatrix.Forward,
+        BaseGridId = towerGrid,
+        Grav = rc.GetNaturalGravity().Length()
+    };
+    destConn = "ZONE";
+    destZone = true;
+    if (path.Count == 0 || Vector3D.Distance(path[path.Count - 1], destPose.Pos) > 5)
+        AddCrumb(rc.GetPosition());
+    haveRoute = true;
+    activeRoute = recordName != "" ? recordName : "Main";
+    SwitchPhase(PhaseId.Idle);
+    SaveRoute();
+    statusMsg = "Saved '" + activeRoute + "': " + homeConn + " -> ZONE (" + path.Count + "wp)";
+}
 DockPose CapturePose(IMyShipConnector c)
 {
     return new DockPose
@@ -594,6 +617,7 @@ DockPose CapturePose(IMyShipConnector c)
         Grav = rc.GetNaturalGravity().Length()
     };
 }
+DockPose DestP() { return asg ? asgPose : destPose; }
 void TickRecording()
 {
     Vector3D p = rc.GetPosition();
@@ -726,7 +750,7 @@ void TickUndock()
 {
     bool fromHome = leg.Outbound;
     var c = GetConnector(fromHome ? homeConn : destConn);
-    DockPose p = fromHome ? homePose : destPose;
+    DockPose p = fromHome ? homePose : DestP();
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
     {
         c.Disconnect();
@@ -747,8 +771,16 @@ void TickUndock()
 void TickDepartStaging()
 {
     bool fromHome = leg.Outbound;
-    DockPose p = fromHome ? homePose : destPose;
-    Vector3D staging = HoldPoint(p);
+    DockPose p = fromHome ? homePose : DestP();
+    if (!fromHome && destZone && asgPathReady && !interiorDone)
+    {
+        if (!interior) ArmInterior(true);
+        if (!RunCruiseControl()) { statusMsg = "Threading out to zone"; return; }
+        interior = false; interiorDone = true;
+        loiterPos = rc.GetPosition(); haveLoiter = true;
+        ReleaseControl();
+    }
+    Vector3D staging = (!fromHome && destZone && interiorDone && haveLoiter) ? loiterPos : HoldPoint(p);
     double distToFix = Vector3D.Distance(rc.GetPosition(), staging);
     if (!stagingAtFix && distToFix < 3.0) stagingAtFix = true;
     else if (stagingAtFix && distToFix > 8.0) stagingAtFix = false;
@@ -821,6 +853,15 @@ void RunCruiseFamily()
     cruiseProgTimer += dt;
     bool done = RunCruiseControl();
     statusMsg = CruiseStatus();
+    if (leg.Outbound && destZone && InZone(rc.GetPosition()))
+    {
+        loiterPos = rc.GetPosition(); haveLoiter = true;
+        cruiseArmed = false;
+        ReleaseControl();
+        SwitchPhase(PhaseId.Holding);
+        phaseTimer = 0;
+        return;
+    }
     if (done)
     {
         cruiseArmed = false;
@@ -841,6 +882,7 @@ void RunCruiseFamily()
 }
 double CruiseCap()
 {
+    if (interior) return dockSpeed;
     if (phase == PhaseId.Climb) return climbSpeed;
     if (phase == PhaseId.Descent) return descentSpeed;
     return cruiseSpeed;
@@ -958,13 +1000,33 @@ void ArmCruise(bool toDest)
     cruiseProgTimer = 0;
     cruiseBestDist = double.MaxValue;
     dockBlockTimer = 0; dockClearFor = 0;
+    interior = false;
     cruiseArmed = true;
     cruiseArmedToDest = toDest;
     statusMsg = toDest ? "Cruising to destination" : "Cruising home";
 }
+void ArmInterior(bool reversed)
+{
+    legWps.Clear();
+    if (reversed)
+        for (int i = asgPath.Count - 1; i >= 0; i--) legWps.Add(asgPath[i]);
+    else
+    {
+        for (int i = 0; i < asgPath.Count; i++) legWps.Add(asgPath[i]);
+        legWps.Add(DestP().Pos);
+    }
+    if (legWps.Count == 0) legWps.Add(rc.GetPosition());
+    BuildVelocityProfile();
+    cruiseIdx = 0;
+    cruiseProgTimer = 0;
+    cruiseBestDist = double.MaxValue;
+    interior = true;
+    cruiseArmed = false;
+}
 void BuildLeg(bool toDest)
 {
     legWps.Clear();
+    if (toDest) { asg = false; asgPath.Clear(); asgPathReady = false; }
     DockPose from = toDest ? homePose : destPose;
     DockPose to   = toDest ? destPose : homePose;
     double skipFrom = EffHoldDist(from) + 3;
@@ -1102,7 +1164,21 @@ bool RunCruiseControl()
 void TickHolding()
 {
     bool toDest = leg.Outbound;
-    DockPose p = toDest ? destPose : homePose;
+    DockPose p = toDest ? DestP() : homePose;
+    if (toDest && destZone)
+    {
+        if (!haveLoiter) { loiterPos = rc.GetPosition(); haveLoiter = true; }
+        StationKeep(loiterPos);
+        AlignTo(rc.WorldMatrix.Forward, rc.WorldMatrix.Up, true);
+        if (!ClearedToProceed("LAND", destConn))
+        { zoneWait = 0; statusMsg = "Loitering in zone - " + TowerWait("LAND"); return; }
+        zoneWait += dt;
+        if (!asgPathReady && zoneWait < PATH_WAIT_SEC)
+        { statusMsg = "Cleared - awaiting interior path"; return; }
+        phaseTimer = 0;
+        SwitchPhase(PhaseId.Taxi);
+        return;
+    }
     Vector3D fix = HoldPoint(p);
     Vector3D grav = rc.GetNaturalGravity();
     bool inGrav = grav.LengthSquared() > 1e-3;
@@ -1156,7 +1232,7 @@ void TickTaxi()
 {
     bool toDest = leg.Outbound;
     var c = GetConnector(toDest ? destConn : homeConn);
-    DockPose p = toDest ? destPose : homePose;
+    DockPose p = toDest ? DestP() : homePose;
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
     {
         AbortAutopilot();
@@ -1169,6 +1245,13 @@ void TickTaxi()
     if (c != null && c.Status == MyShipConnectorStatus.Connectable)
         c.Connect();
     if (rc.IsAutoPilotEnabled) AbortAutopilot();
+    if (toDest && destZone && asgPathReady && !interiorDone)
+    {
+        if (!interior) ArmInterior(false);
+        if (!RunCruiseControl()) { statusMsg = "Threading to pad"; return; }
+        interior = false; interiorDone = true;
+        ReleaseControl();
+    }
     if (DockCorridorBlocked(p))
     {
         dockBlockTimer = 0; dockClearFor = 0;
@@ -1245,7 +1328,6 @@ double AlignTo(Vector3D targetFwd, Vector3D targetUp, double maxRad, bool coastH
     }
     Vector3D err = fErr + uErr;
     double attErr = fErr.Length() + uErr.Length();
-    lastAlignErr = attErr;
     Vector3D angVel = rc.GetShipVelocities().AngularVelocity;
     if (coastHold)
     {
@@ -1525,7 +1607,6 @@ string NormalizeView(string v)
         case VIEW_MENU:   return VIEW_MENU;
         case VIEW_STATUS: return VIEW_STATUS;
         case VIEW_TRIP:   return VIEW_TRIP;
-        case VIEW_TELEM:  return VIEW_TELEM;
         default:          return VIEW_FULL;
     }
 }
@@ -1582,14 +1663,21 @@ double CargoFillPct()
     }
     return max <= 0 ? 0 : cur / max * 100.0;
 }
-bool TowerActive() { return useTower && towerAge < TOWER_TIMEOUT; }
+bool TowerActive(long target) { return useTower && towerAge < TOWER_TIMEOUT && GridMatch(towerGrid, target); }
+bool GridMatch(long a, long b) { return a == 0 || b == 0 || a == b; }
+long TargetGrid(bool forLanding)
+{
+    bool wantDest = forLanding ? leg.Outbound : !leg.Outbound;
+    return wantDest ? destPose.BaseGridId : homePose.BaseGridId;
+}
 bool ClearedToProceed(string action, string dock)
 {
-    if (!TowerActive()) return true;
+    long target = TargetGrid(action == "LAND");
+    if (!TowerActive(target)) return true;
     if (cleared && reqAction == action) return true;
     if (!clearanceRequested || reqTimer >= REQ_RESEND)
     {
-        IGC.SendBroadcastMessage(channel, "CMD|REQ|" + shipName + "|" + action + "|" + dock);
+        IGC.SendBroadcastMessage(channel, "CMD|REQ|" + shipName + "|" + action + "|" + dock + "|" + target);
         clearanceRequested = true; reqAction = action; reqTimer = 0; cleared = false;
     }
     return false;
@@ -1614,12 +1702,64 @@ void DrainIgc()
             if (who == "*" || who.Equals(shipName, StringComparison.OrdinalIgnoreCase))
                 RequestDepart();
         }
-        else if (f[1] == "TOWER") towerAge = 0;
-        else if (f[1] == "CLEAR" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
-        { cleared = true; holdReason = ""; }
-        else if (f[1] == "HOLD" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
+        else if (f[1] == "TOWER")
+        {
+            long g = f.Length >= 4 ? ParseLong(f[3]) : 0;
+            long hg = homePose.BaseGridId, dg = destPose.BaseGridId;
+            if (g == 0 || dg == 0 || g == hg || g == dg)
+            {
+                towerAge = 0; towerGrid = g;
+                if (f.Length >= 8 && (TryVec(f[4], out zoneCenter) & TryVec(f[5], out zoneFwd)
+                    & TryVec(f[6], out zoneUp) & TryVec(f[7], out zoneExt)))
+                    haveZone = true;
+            }
+        }
+        else if (f[1] == "CLEAR" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction && GridMatch(towerGrid, TargetGrid(reqAction == "LAND")))
+        {
+            cleared = true; holdReason = "";
+            if (reqAction == "LAND" && f.Length >= 9
+              && (TryVec(f[5], out asgPose.Pos) & TryVec(f[6], out asgPose.Fwd)
+                & TryVec(f[7], out asgPose.Up)  & TryVec(f[8], out asgPose.ConnFwd)))
+            {
+                asgPose.Grav = destPose.Grav;
+                asgPose.BaseGridId = destPose.BaseGridId;
+                asgPose.HoldDist = destPose.HoldDist;
+                asg = true;
+            }
+        }
+        else if (f[1] == "HOLD" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction && GridMatch(towerGrid, TargetGrid(reqAction == "LAND")))
         { cleared = false; holdReason = f.Length >= 5 ? f[4] : "hold"; }
+        else if (f[1] == "PATH" && f.Length >= 6 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase))
+            OnPathChunk(f[3], f[4], f[5]);
     }
+}
+void OnPathChunk(string seqS, string totalS, string payload)
+{
+    int seq = ParseInt(seqS, 0), total = ParseInt(totalS, 1);
+    if (seq == 0 || asgPathRx.Count == 0) asgPathRx.Clear();
+    if (payload.Length > 0)
+    {
+        var parts = payload.Split(';');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            Vector3D v;
+            if (parts[i].Length > 0 && TryVec(parts[i], out v)) asgPathRx.Add(v);
+        }
+    }
+    if (seq >= total - 1)
+    {
+        asgPath = new List<Vector3D>(asgPathRx);
+        asgPathReady = asgPath.Count > 0;
+    }
+}
+bool InZone(Vector3D p)
+{
+    if (!haveZone) return false;
+    Vector3D d = p - zoneCenter;
+    Vector3D right = Vector3D.Cross(zoneFwd, zoneUp);
+    return Math.Abs(d.Dot(right)) <= zoneExt.X
+        && Math.Abs(d.Dot(zoneUp)) <= zoneExt.Y
+        && Math.Abs(d.Dot(zoneFwd)) <= zoneExt.Z;
 }
 void RequestDepart()
 {
@@ -1963,7 +2103,6 @@ string BuildView(string view)
         case VIEW_MENU:   return BuildMenu();
         case VIEW_STATUS: return BuildStatus();
         case VIEW_TRIP:   return BuildTrip();
-        case VIEW_TELEM:  return BuildTelem();
         default:          return BuildHeader() + BuildMenu();
     }
 }
@@ -2021,46 +2160,6 @@ string BuildTrip()
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg);
-    return sb.ToString();
-}
-string BuildTelem()
-{
-    var sb = new StringBuilder();
-    sb.Append("-- Telemetry --\n");
-    if (rc == null) { sb.Append("no remote control"); return sb.ToString(); }
-    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
-    Vector3D grav = rc.GetNaturalGravity();
-    double gMag = grav.Length();
-    double spd = rc.GetShipSpeed();
-    sb.Append(ShipState()).Append(operating ? " [RUN]" : " [STOP]")
-      .Append("  t=").Append(phaseTimer.ToString("0.0")).Append("s\n");
-    sb.Append("Spd ").Append(spd.ToString("0.0")).Append("m/s");
-    if (cruiseArmed && cruiseIdx < legVmax.Count)
-        sb.Append(" /").Append(Math.Min(CruiseCap(), legVmax[cruiseIdx]).ToString("0")).Append("cap");
-    sb.Append('\n');
-    if (gMag > 1e-3)
-    {
-        Vector3D up = -grav / gMag;
-        double vrate = vel.Dot(up);
-        sb.Append("VS  ").Append(vrate >= 0 ? "+" : "").Append(vrate.ToString("0.0")).Append("m/s\n");
-    }
-    else sb.Append("VS  (space)\n");
-    sb.Append("Grav ").Append(gMag.ToString("0.00")).Append("m/s2 ")
-      .Append((gMag / 9.81).ToString("0.00")).Append("g\n");
-    double surf;
-    if (rc.TryGetPlanetElevation(MyPlanetElevation.Surface, out surf))
-        sb.Append("Alt ").Append(surf.ToString("0")).Append("m\n");
-    else
-        sb.Append("Alt --\n");
-    if (cruiseArmed && legWps.Count > 0)
-        sb.Append("WP ").Append(cruiseIdx + 1).Append('/').Append(legWps.Count)
-          .Append("  ").Append((RemainingDistance() / 1000.0).ToString("0.00")).Append("km\n");
-    else
-        sb.Append("WP --\n");
-    sb.Append("Att ").Append((lastAlignErr * 57.2958).ToString("0.0")).Append("deg\n");
-    double h2 = HydrogenPct(), batt = BatteryPct();
-    sb.Append("H2 ").Append(h2 < 0 ? "n/a" : h2.ToString("0") + "%")
-      .Append("  Bat ").Append(batt < 0 ? "n/a" : batt.ToString("0") + "%");
     return sb.ToString();
 }
 string ShipState()
@@ -2141,73 +2240,6 @@ void Broadcast()
     });
     IGC.SendBroadcastMessage(channel, msg);
 }
-class ShuttleReport
-{
-    public string Name, State;
-    public int EtaSec, DistM, Fill;
-    public double MassT;
-    public bool Running;
-    public double Age;
-}
-void RunBase()
-{
-    if (listener == null) listener = IGC.RegisterBroadcastListener(channel);
-    while (listener.HasPendingMessage)
-    {
-        var m = listener.AcceptMessage();
-        var s = m.Data as string;
-        if (s == null) continue;
-        var f = s.Split('|');
-        if (f.Length < 7) continue;
-        var r = new ShuttleReport
-        {
-            Name = f[0],
-            State = f[1],
-            EtaSec = ParseInt(f[2], -1),
-            DistM = ParseInt(f[3], 0),
-            Fill = ParseInt(f[4], 0),
-            MassT = ParseDouble(f[5], 0),
-            Running = f[6] == "1",
-            Age = 0
-        };
-        fleet[r.Name] = r;
-    }
-    foreach (var r in fleet.Values) r.Age += dt;
-    var sb = new StringBuilder();
-    sb.Append("== Shuttle Board v").Append(VERSION).Append(" ==\n\n");
-    if (fleet.Count == 0) sb.Append("Waiting for shuttle signal...\n");
-    foreach (var r in fleet.Values)
-    {
-        if (r.Age > 20) { sb.Append(r.Name).Append(": NO SIGNAL (").Append((int)r.Age).Append("s)\n\n"); continue; }
-        sb.Append(r.Name).Append(": ").Append(PrettyState(r.State)).Append('\n');
-        if (r.EtaSec >= 0)
-            sb.Append("   ETA ").Append((r.EtaSec / 60).ToString("00")).Append(':').Append((r.EtaSec % 60).ToString("00"))
-              .Append("   ").Append((r.DistM / 1000.0).ToString("0.0")).Append(" km\n");
-        sb.Append("   Cargo ").Append(r.Fill).Append("%   ").Append(r.MassT.ToString("0.0")).Append("t\n\n");
-    }
-    var text = sb.ToString();
-    Echo(text);
-    var panels = new List<IMyTextPanel>();
-    GridTerminalSystem.GetBlocksOfType(panels, b => b.CubeGrid.IsSameConstructAs(Me.CubeGrid) && b.CustomName.Contains(lcdTag));
-    foreach (var p in panels) { p.ContentType = ContentType.TEXT_AND_IMAGE; p.WriteText(text); }
-    Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
-    Me.GetSurface(0).WriteText(text);
-}
-string PrettyState(string s)
-{
-    switch (s)
-    {
-        case "Loading":      return "Loading at home";
-        case "CruiseToDest": return "En route to station";
-        case "ApproachDest": return "Docking at station";
-        case "Unloading":    return "Unloading at station";
-        case "CruiseToHome": return "Returning home";
-        case "ApproachHome": return "Docking at home";
-        case "Idle":         return "Idle";
-        case "Faulted":      return "FAULT - needs attention";
-        default:             return s;
-    }
-}
 void WriteConfigTemplate()
 {
     var ini = new MyIni();
@@ -2222,26 +2254,10 @@ void BackfillConfig()
     WriteShuttleSection(ini);
     Me.CustomData = ini.ToString();
 }
-void TrimBaseConfig()
-{
-    var ini = new MyIni();
-    ini.TryParse(Me.CustomData);
-    ini.DeleteSection("sf");
-    WriteBaseSection(ini);
-    Me.CustomData = ini.ToString();
-}
-void WriteBaseSection(MyIni ini)
-{
-    ini.Set("sf", "role", "base");
-    ini.Set("sf", "shipName", shipName);
-    ini.Set("sf", "channel", channel);
-    ini.Set("sf", "lcdTag", lcdTag);
-}
 void WriteShuttleSection(MyIni ini)
 {
     string modeStr = runMode == RunMode.OneTrip ? "ONETRIP"
                    : runMode == RunMode.OneWay ? "ONEWAY" : "CONTINUOUS";
-    ini.Set("sf", "role", role == Role.Base ? "base" : "shuttle");
     ini.Set("sf", "shipName", shipName);
     ini.Set("sf", "channel", channel);
     ini.Set("sf", "useTower", useTower ? "auto" : "off");
@@ -2283,8 +2299,6 @@ void LoadConfig()
     var ini = new MyIni();
     if (!ini.TryParse(Me.CustomData)) return;
     MigrateLegacyConfig(ini);
-    string roleStr = ini.Get("sf", "role").ToString("shuttle").Trim().ToLowerInvariant();
-    role = (roleStr == "base" || roleStr == "station") ? Role.Base : Role.Shuttle;
     shipName = ini.Get("sf", "shipName").ToString(shipName);
     channel = ini.Get("sf", "channel").ToString(channel);
     useTower = ini.Get("sf", "useTower").ToString(useTower ? "auto" : "off").Trim().ToLowerInvariant() == "auto";
@@ -2374,6 +2388,7 @@ void WriteRoute(MyIni ini, string name)
     ini.Set(s, "destHoldDist", destPose.HoldDist);
     ini.Set(s, "homeG", homePose.Grav);
     ini.Set(s, "destG", destPose.Grav);
+    ini.Set(s, "destZone", destZone ? "1" : "0");
     var sb = new StringBuilder();
     for (int i = 0; i < path.Count; i++) { if (i > 0) sb.Append(';'); sb.Append(Vec(path[i])); }
     ini.Set(s, "path", sb.ToString());
@@ -2443,6 +2458,7 @@ void LoadRouteInto(MyIni ini, string name)
     destPose.HoldDist = ini.Get(s, "destHoldDist").ToDouble(0);
     homePose.Grav = ini.Get(s, "homeG").ToDouble(0);
     destPose.Grav = ini.Get(s, "destG").ToDouble(0);
+    destZone = ini.Get(s, "destZone").ToString("0") == "1";
     path.Clear();
     var raw = ini.Get(s, "path").ToString("");
     if (!string.IsNullOrEmpty(raw))
@@ -2609,4 +2625,5 @@ bool TryVec(string s, out Vector3D v)
     return true;
 }
 int ParseInt(string s, int def) { int r; return int.TryParse(s, out r) ? r : def; }
+long ParseLong(string s) { long r; return long.TryParse(s, out r) ? r : 0; }
 double ParseDouble(string s, double def) { double r; return double.TryParse(s, out r) ? r : def; }

@@ -4,6 +4,116 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-08-15
+
+Slice i — **tower-relayed pad paths + holding zones**, and a script split so the flight half stands
+alone. The target scenario is a station the ship does **not** own: a hole-in-the-wall entrance and a
+bank of pads at varied angles *inside* the structure, where a straight taxi from the outer fix would
+punch through a wall. The trip now splits into two ownership domains — **ship-owned** (home → cruise
+breadcrumbs → **holding zone**) and **tower-owned** (**interior path → pad**, relayed on grant). The
+station route's destination becomes a tower-owned **holding zone** (an oriented box); the ship loiters
+anywhere inside it, so a queue spreads out instead of fighting for one point. On LAND clearance the
+tower assigns a free pad, relays its pose (as in Slice h) **and streams that pad's recorded interior
+breadcrumb path**; the ship threads it in at `dockSpeed` and docks. On DEPART the tower re-streams the
+path and the ship reverses it back out to the zone.
+
+Setup tooling (recording zones, pads, and interior paths) is extracted **out of SkippyFlight** into a
+new **teach mode of SkippyTower** — run on a second Programmable Block on the ship. SkippyFlight keeps
+only the flying half. This isolates the tower/setup concerns from flight automation (not everyone wants
+a tower) and reclaims the ship's char budget.
+
+### Added
+- **Holding zone (tower)** — an oriented box (`center` + `fwd`/`up` axes + half-extents `ext`), taught
+  once and persisted as a `[zone]` section, advertised in the heartbeat
+  (`CMD|TOWER|<zone>|<center>|<fwd>|<up>|<ext>`). A zone-destination route arrives by being *inside the
+  box* (`InZone`), not at a pin — so ships loiter where they entered and a queue naturally spreads.
+- **Interior pad paths (tower)** — each pad gains a recorded breadcrumb trail (holding-zone → pad),
+  persisted in its `[pad.<name>]` `path` key. On a LAND grant the tower streams the assigned pad's path
+  (`CMD|PATH|<ship>|<seq>|<total>|<v>;<v>…`, chunked); on DEPART it re-streams the occupied pad's path.
+- **`RECORD ZONE` (ship)** — finalize a route whose destination is a holding zone: snapshots the live
+  open-space pose as `destPose` and sets a per-route `destZone` flag (persisted). Cruise aims at the
+  hold point but arrival is **also** satisfied by `InZone`.
+- **Interior-path following (ship)** — `ArmInterior(reversed)` loads the relayed path into the cruise
+  follower; `CruiseCap()` creeps at `dockSpeed` while threading. Inbound (Taxi) follows the path to the
+  pad then connects; outbound (DepartStaging) reverses it out to the zone then rejoins cruise home.
+- **SkippyTower teach mode (`towerMode = teach`)** — a ship-side setup helper (2nd PB on the ship) that
+  records the zone, pad poses, and interior paths by hand-flying, streaming them to the station tower.
+  Commands: `REGZONE [w h d]`, `REGPATH <pad>` (fly in + dock auto-finalizes path **and** pad pose),
+  `REGPATH END`/`CANCEL`, `REGPAD <pad>` (open-air pad, pose only). Emits **no heartbeat** and answers
+  **no clearance** — a pure teaching tool, safe on a live fleet channel. New `[sf]` keys: `remoteName`,
+  `teachSeg`, `teachTurn`.
+- **Grid-scoped clearance** — the tower now advertises its construct's grid id in the heartbeat
+  (`CMD|TOWER|<zone>|<gridId>[|zone geom]`) and every ship names its target dock's grid in each request
+  (`CMD|REQ|<ship>|<action>|<dock>|<grid>`). A ship only obeys, requests from, and accepts `CLEAR`/`HOLD`
+  grants from the tower whose grid matches the dock it is arriving at / departing from. **Fixes:** with
+  more than one static grid on a shared channel, a tower could gate and clear a ship bound for a *different*
+  grid (it "cleared it to land" regardless of destination). Connector routes carry the dock's grid via
+  `destBaseId`/`homeBaseId`; `RECORD ZONE` now stamps the advertising tower's grid so zone routes are
+  scoped too. A grid id of `0` (legacy tower, or a route recorded before this change) falls back to
+  accept-any.
+
+### Removed
+- **`role = base` / board rendering from SkippyFlight** — the ship no longer doubles as a status board.
+  Use `SkippyTower` with `towerMode = board` (a byte-for-byte drop-in) instead. Frees the char budget
+  that the interior-path flight wiring needed.
+- **Ship-side `REGPAD` / teaching commands** — pad, zone, and path teaching now live in SkippyTower's
+  teach mode. The ship is receive-only for pad/zone/path data.
+
+### Notes
+- **Backward compatible.** A pad with no recorded path is treated as open-air: the ship uses the
+  Slice h straight-line last mile. A route with no zone / a legacy tower that never streams a path →
+  the ship falls back cleanly. Scenario 1 (recorded home↔dest) is untouched. Grid scoping is additive:
+  the heartbeat's grid id and the request's grid field are appended, and a `0`/absent id falls back to
+  accept-any — legacy towers govern same-grid ships and legacy ships still get cleared. All protocol
+  extensions append fields or add verbs; old ships/towers split unbounded and read only the fields they
+  know.
+- **Version bump:** tower `0.12.0 → 0.13.0`, ship `0.11.0 → 0.12.0`. MINOR — additive protocol, and
+  the removals are covered by SkippyTower's board/teach modes (pre-1.0, so a MINOR may carry them).
+- Build after Slice i: `SkippyFlight.min.cs` **97,824 chars** (2,176 headroom), braces 517/517;
+  `SkippyTower.min.cs` **24,845 chars** (75,155 headroom), braces 116/116.
+
+## [0.12.0] - 2026-08-14
+
+Slice h — **dynamic pad bank.** The tower can own a pool of interchangeable docking pads and assign a
+*free* one to each arriving ship at clearance time, so ships **park in parallel** while **movement
+stays serialized** (the single-corridor anti-collision guarantee is unchanged). This removes the old
+implicit assumption that every ship has its own dedicated connector — with one shared connector, a
+second lander used to hover and deadlock behind a parked ship.
+
+The pad geometry problem (a dock pose bakes in the recording ship's Remote-Control-to-connector offset,
+which the station can't derive) is solved by **record-once-relay**: a pad's pose is recorded **once by
+any ship** (`REGPAD`), pushed to and stored on the tower, and relayed to whichever ship is later
+assigned that pad. This assumes a **geometrically uniform drone fleet** (a pose recorded by one ship
+docks another).
+
+### Added
+- **Pad registry on the tower** — a pool of named pads, each with a stored world dock pose, persisted
+  as `[pad.<name>]` Custom Data sections (`pos/fwd/up/connFwd`, `X:Y:Z`). Delete a section to retire a
+  pad; occupancy is live-only (never persisted).
+- **`REGPAD <name>`** (ship command, while docked) — capture this dock's pose and broadcast it to the
+  tower as `CMD|PAD|<name>|<pos>|<fwd>|<up>|<connFwd>`. Any one ship registers each pad, once.
+- **Pad-aware LAND clearance** — a LAND grant now needs the corridor free **and** a free pad; the tower
+  reserves the pad (`OccupiedBy = ship`) and appends its pose to the grant:
+  `CMD|CLEAR|<ship>|LAND|<pad>|<pos>|<fwd>|<up>|<connFwd>`. The ship steers to the assigned pad for the
+  terminal approach and undock (`DestP()` override); gravity/scenario classification stays on its own
+  recorded `destPose`. DEPART grants are unchanged.
+- **Parallel parking, serial movement** — a pad is occupied from LAND-grant until its ship departs (or
+  is lost/faulted/idle), which outlives the corridor slot (freed the moment the ship docks). Two ships
+  park on two pads; the corridor still admits only one maneuvering craft at a time.
+- **`no pad` hold** — a LAND with every pad occupied is held (`CMD|HOLD|<ship>|LAND|no pad`) and, in
+  auto mode, a waiting DEPART is served ahead of it (departing frees a pad, clearing the jam).
+- **`PADFREE <name>`** (tower command) — force-free a pad's occupancy (deadlock breaker).
+- **Pads block on the tower board** — each pad listed `free` or `<ship>`.
+
+### Notes
+- **Backward compatible.** With no pads registered (or no tower), LAND grants carry no pose and ships
+  dock at their own recorded `destPose` — exactly the pre-pad-bank behaviour. An un-upgraded `0.10.0`
+  ship ignores the extra grant fields (`DrainIgc` reads only `f[0..3]`) and docks at its own pose.
+- **Version bump:** tower `0.11.0 → 0.12.0`, ship `0.10.0 → 0.11.0` (both gain the feature). MINOR —
+  the protocol extension is additive and the fallback path preserves old behaviour.
+- Build after Slice h: `SkippyTower.min.cs` stripped **13,586 chars** (86,414 headroom), braces
+  balanced 70/70; `SkippyFlight.min.cs` **98,618 chars** (1,382 headroom), braces 511/511.
+
 ## [0.11.0] - 2026-08-14
 
 Slice g — **manual approval mode for SkippyTower.cs.** An air-traffic-controller option: "man" the

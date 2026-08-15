@@ -3,22 +3,21 @@
  * For pure ferry duty: cargo between two docks (e.g. a planet
  * base and an orbital station). Full docs in README.md / CHANGELOG.md.
  *
- * ONE script, TWO roles - paste into both PBs; role is set in Custom Data:
- *   role = shuttle : flies the route and manages cargo.
- *   role = base    : renders every shuttle's status + ETA to tagged LCDs.
- *                    ("station" is accepted as an alias for base.)
+ * Flight automation only - paste into the ship PB. For a status board or pad-bank
+ * control tower, run SkippyTower alongside it (towerMode = board renders every
+ * shuttle's status + ETA to tagged LCDs; drop-in replacement for the old role = base).
  *
  * QUICK START (ship): recompile once (writes a Custom Data template, edit + recompile
  * again) -> dock at home, RECORD HOME -> fly to the destination by hand -> dock there,
  * RECORD DEST (route saved under [route]; copy that section to clone it) -> START.
  *
- * COMMANDS (run-arg on the ship PB): RECORD HOME | RECORD DEST | START/GO | STOP |
- *   HOME | DEPART (release the current dock now; on a base PB broadcasts DEPART, or
- *   DEPART <shipName>, to the fleet) | MODE CONTINUOUS|ONETRIP|ONEWAY | RESUME |
- *   CLEARROUTE | UP | DOWN | APPLY | BACK (the last four drive the on-screen menu).
+ * COMMANDS (run-arg on the ship PB): RECORD HOME | RECORD DEST | RECORD ZONE |
+ *   START/GO | STOP | HOME | DEPART (release the current dock now) |
+ *   MODE CONTINUOUS|ONETRIP|ONEWAY | RESUME | CLEARROUTE |
+ *   UP | DOWN | APPLY | BACK (the last four drive the menu).
  *
- * CONFIG: the [sf] Custom Data section (auto-generated; every key optional
- * except role). See README.md for the full key table and semantics.
+ * CONFIG: the [sf] Custom Data section (auto-generated; every key optional).
+ * See README.md for the full key table and semantics.
  *
  * SCREEN VIEWS: each ship screen shows ONE view so a multi-screen cockpit can split
  * the display - full (header+menu, the default), menu, status, trip. Assign via a
@@ -41,13 +40,33 @@
  * camera and HOLDS off if another grid is parked on / crossing the connector (anti-
  * collision), auto-resuming when clear; see DockCorridorBlocked. Sorters are
  * only toggled on/off (filters/Drain-All untouched); tag match is case-insensitive
- * anywhere in the name. Version tracked in CHANGELOG.md. Semver.
+ * anywhere in the name.
+ *
+ * PAD BANK + HOLDING ZONES (with a SkippyTower running control): the tower can own a
+ * pool of pads and a holding zone, and assign a free pad to each arriving ship, so ships
+ * park in parallel while movement stays serialized. Pads and interior paths are taught to
+ * the tower with the SkippyTower teach helper (a second PB in towerMode = teach), not on
+ * this ship. For a station the ship does NOT own, the route's destination is a tower-owned
+ * holding ZONE (RECORD ZONE, captured in open space): the ship cruises in, loiters inside
+ * the box, and on LAND clearance the tower relays the assigned pad's pose
+ * (CMD|CLEAR|<ship>|LAND|<pad>|<pos>|<fwd>|<up>|<connFwd>) AND streams that pad's recorded
+ * interior breadcrumb path (CMD|PATH, chunked); the ship threads it in at dockSpeed and
+ * docks. On DEPART the tower re-streams the path and the ship reverses it back out to the
+ * zone. No path relayed (owned open-air dock / legacy tower) -> the ship docks straight to
+ * the relayed or recorded pose exactly as before (fully backward compatible).
+ *
+ * GRID-SCOPED CLEARANCE: the tower advertises its construct's grid id in the heartbeat
+ * (CMD|TOWER|<zone>|<gridId>[|zone geom]) and the ship names its target dock's grid in every
+ * request (CMD|REQ|<ship>|<action>|<dock>|<grid>). A ship only obeys, requests from, and
+ * accepts CLEAR/HOLD grants from the tower whose grid matches the dock it is arriving at /
+ * departing from - so with several grids on one channel, a tower can never gate or clear a
+ * ship bound for a different grid. A grid id of 0 (legacy tower, or a route recorded before
+ * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.10.0";
+const string VERSION = "0.12.0";
 
-// ---- Roles / states --------------------------------------------------------
-enum Role { Shuttle, Base }
+// ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
 // dest -> home); OneWay runs a single leg to the OPPOSITE end and holds there, the
 // next START sending it back. Which way OneWay goes is decided by which END it's
@@ -275,7 +294,6 @@ class FaultedPhase : FlightPhase
 
 
 // ---- Configuration (loaded from Custom Data) -------------------------------
-Role role = Role.Shuttle;
 RunMode runMode = RunMode.Continuous;
 DepartTrigger homeTrigger = DepartTrigger.Auto;   // what releases the shuttle from HOME
 DepartTrigger destTrigger = DepartTrigger.Auto;   // what releases it from the DESTINATION
@@ -320,6 +338,7 @@ DockPose homePose, destPose;
 string homeConn = "", destConn = "";
 List<Vector3D> path = new List<Vector3D>();   // home -> dest breadcrumbs
 bool haveRoute = false;
+bool destZone = false;          // the destination is a tower-owned holding ZONE (arrival = InZone), not a fixed dock; set by RECORD ZONE, persisted per route
 string activeRoute = "";        // name of the route currently loaded into homePose/destPose/path ("" = none)
 string recordName = "";         // route name captured at RECORD HOME, consumed at RECORD DEST
 List<string> routeNames = new List<string>();  // saved route names (cache; rebuilt on save/switch/delete/boot)
@@ -337,7 +356,6 @@ Dictionary<PhaseId, FlightPhase> phases;   // one instance per phase, built in P
 bool operating = false;          // set by START, cleared by STOP / OneTrip end
 string statusMsg = "Idle";
 double phaseTimer = 0;           // seconds spent in the current timed phase
-double lastAlignErr = 0;         // last attitude error from AlignTo (rad-ish); surfaced on the telem view for stall diagnosis
 bool departRequested = false;    // manual "Depart Now" latch (ship button / station IGC); consumed on departure
 
 // ---- Fuel / charge gate ----------------------------------------------------
@@ -369,11 +387,29 @@ bool stagingAtFix = false;                         // latched once the ship firs
 
 // ---- Tower clearance handshake (ephemeral, never persisted; reset on every phase change) ----
 double towerAge = 9999;                            // s since the last CMD|TOWER heartbeat; starts stale so TowerActive() reads false until a real tower is heard (a 0 default would falsely gate every ship)
+long towerGrid = 0;                                // grid id advertised by the last relevant heartbeat (0 = none / legacy tower). Only a heartbeat whose grid matches this route's home/dest is adopted, so a tower on an unrelated grid can't govern this ship
 bool cleared = false;                              // the tower granted the current gate (matched to reqAction)
 bool clearanceRequested = false;                   // a CMD|REQ has been sent for the current gate wait
 string reqAction = "";                             // "DEPART" or "LAND": which grant a CMD|CLEAR/HOLD must match to apply
 string holdReason = "";                            // last CMD|HOLD reason, surfaced in the status line
 double reqTimer = 0;                               // s since the last CMD|REQ send; drives REQ_RESEND
+DockPose asgPose;                                  // pad pose the tower assigned in the LAND grant (pad-bank mode); overrides destPose for the terminal approach only
+bool asg = false;                                  // true once a pad pose is assigned; cleared at trip's end so an assignment never leaks into the next round
+
+// ---- Holding zone + interior paths (Slice i: station the ship does NOT own) ----
+// The zone is an oriented box the tower advertises in its heartbeat; a station route targets
+// it instead of a pin-point pad, and the ship loiters wherever it entered (a queue spreads out).
+// The interior path is the tower-relayed breadcrumb trail (zone <-> pad) the ship threads with
+// the SAME cruise follower used for cruise breadcrumbs - so a straight taxi never punches a wall.
+bool haveZone;                                     // a holding zone was advertised in the last heartbeat
+Vector3D zoneCenter, zoneFwd, zoneUp, zoneExt;     // oriented box: world center, forward/up axes, half-extents (X=right, Y=up, Z=forward)
+List<Vector3D> asgPath = new List<Vector3D>();     // the granted pad's interior breadcrumbs (empty = open-air pad -> straight-line fallback)
+List<Vector3D> asgPathRx = new List<Vector3D>();   // reassembly buffer for incoming CMD|PATH chunks
+bool asgPathReady;                                 // asgPath is complete and ready to follow
+bool interior;                                     // currently following an interior path (caps CruiseCap at dockSpeed)
+bool interiorDone;                                 // the interior path has been threaded this leg (latch; don't re-arm)
+Vector3D loiterPos; bool haveLoiter;               // captured zone entry / exit point; Holding & zone-egress staging keep station here
+double zoneWait;                                   // s spent loitering post-LAND-grant waiting for the interior path stream (bounded by PATH_WAIT_SEC before straight-line fallback)
 
 // ---- Display views (ship role) ---------------------------------------------
 // Each ship screen shows ONE view, so a 3-screen cockpit can split the display
@@ -383,7 +419,7 @@ double reqTimer = 0;                               // s since the last CMD|REQ s
 // looks exactly as before. A screen picks its view by name tag ([SF:trip])
 // or, for a multi-surface block like a cockpit, a [sf-screens] section in
 // that block's Custom Data (see ParseScreenTag / Discover).
-const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
+const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip";
 
 // ---- LCD menu (ship role) --------------------------------------------------
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
@@ -414,9 +450,6 @@ List<IMyGasTank> h2Tanks = new List<IMyGasTank>();  // hydrogen tanks (fuel-gate
 List<IMyBatteryBlock> batteries = new List<IMyBatteryBlock>();  // batteries (charge-gate reading)
 List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();      // dock-clearance raycast (anti-collision on final approach)
 IMyBroadcastListener listener;
-
-// ---- Base-role state -------------------------------------------------------
-Dictionary<string, ShuttleReport> fleet = new Dictionary<string, ShuttleReport>();
 
 const double DT_FALLBACK = 1.0 / 6.0;   // seconds/tick fallback (first tick / long pause)
 double dt = DT_FALLBACK;                 // real elapsed time this tick; timers use this, not a fixed rate
@@ -474,6 +507,7 @@ const double DOCK_MATCH_DIST = 10.0;      // m: how close to a recorded docked p
 const double CLEAR_CONE_DOT = 0.70;       // cos(~45 deg): a camera must face this close to the dock direction for its raycast to be trusted (an out-of-cone ray silently reads empty, i.e. falsely "clear")
 const double CLEAR_CONFIRM_SEC = 1.5;     // s the corridor must read clear before a held approach resumes - debounces a ship briefly crossing the corridor so we don't lurch into its path
 const double STAGE_CONFIRM_SEC = 1.5;     // s the ship must hold assembled+aligned at the departure staging fix before it commits to cruise (assemble-before-flying dwell)
+const double PATH_WAIT_SEC = 4.0;         // s a zone-cleared ship loiters waiting for the tower's interior-path stream before falling back to the straight-line taxi (open-air pad / legacy tower / dropped chunks)
 const double CLEAR_RANGE_PAD = 5.0;       // m added to the dock distance when checking the camera has charged enough scan range to reach past the mating plane
 const double CLEAR_LEGACY_MARGIN = 5.0;   // m: pre-0.15 routes store no base grid id, so identity can't be checked - treat only a hit this much closer than the dock point as an obstruction (stay conservative; re-record to enable identity checks)
 
@@ -509,19 +543,14 @@ Program()
     };
     if (string.IsNullOrWhiteSpace(Me.CustomData)) WriteConfigTemplate();
     LoadConfig();
-    if (role == Role.Shuttle) BackfillConfig();   // add keys introduced by a newer version, keeping the route/state
-    else TrimBaseConfig();                         // a board ignores the flight/cargo keys - keep its config clean
+    BackfillConfig();   // add keys introduced by a newer version, keeping the route/state
     Discover();
     LoadRoute();
     LoadState();
-    // Both roles listen on the channel: the base for status reports, the ship for
-    // remote DEPART commands sent by a station PB.
+    // Listen on the channel for remote DEPART commands and the tower heartbeat/grants.
     listener = IGC.RegisterBroadcastListener(channel);
-    if (role == Role.Shuttle)
-    {
-        dampenersOwned = true;   // one-time safety restore below: a mid-flight recompile never leaves the ship adrift
-        ReleaseControl();         // clear any thruster/gyro overrides left by a previous compile
-    }
+    dampenersOwned = true;   // one-time safety restore: a mid-flight recompile never leaves the ship adrift
+    ReleaseControl();         // clear any thruster/gyro overrides left by a previous compile
 }
 
 void Save()
@@ -555,9 +584,7 @@ void Main(string argument, UpdateType source)
 
         if (!string.IsNullOrEmpty(argument)) HandleCommand(argument.Trim());
 
-        if (role == Role.Base) { RunBase(); return; }
-
-        // Ship role - re-discover cheaply if the remote vanished (regrind etc.)
+        // Re-discover cheaply if the remote vanished (regrind etc.)
         if (rc == null) { Discover(); if (rc == null) { statusMsg = "No Remote Control found"; RenderShip(); return; } }
 
         DrainIgc();   // accept remote DEPART commands + tower heartbeat/grants from other PBs
@@ -606,6 +633,12 @@ void SwitchPhase(PhaseId next)
     // request fresh, so a DEPART grant can't satisfy a later LAND (nor a home-depart grant
     // a dest-depart). reqTimer primed at the resend threshold so the first check sends now.
     cleared = false; clearanceRequested = false; holdReason = ""; reqTimer = REQ_RESEND;
+    // Every departure passes through Undock before either interior threading (inbound Taxi / egress
+    // DepartStaging), and Undock precedes the DepartStaging turn that re-runs BuildLeg. Resetting the
+    // transient interior latches here (NOT in BuildLeg, which the staging turn calls every tick) arms
+    // each threading exactly once. asgPath itself survives (a DEPART re-stream replaces it; if it drops,
+    // the retained inbound path reversed is still the right egress).
+    if (next == PhaseId.Undock) { interior = false; interiorDone = false; haveLoiter = false; zoneWait = 0; }
 }
 
 // The Faulted phase's behavior: stop driving, drop control, kill the sorters. Was an
@@ -678,7 +711,8 @@ void HandleCommand(string arg)
         case "RECORD":
             if (parts.Length > 1 && parts[1] == "HOME") RecordHome(parts.Length > 2 ? raw[2] : "");
             else if (parts.Length > 1 && parts[1] == "DEST") RecordDest(parts.Length > 2 ? raw[2] : "");
-            else statusMsg = "Usage: RECORD HOME [name] | RECORD DEST";
+            else if (parts.Length > 1 && parts[1] == "ZONE") RecordZone();
+            else statusMsg = "Usage: RECORD HOME [name] | RECORD DEST | RECORD ZONE";
             break;
 
         case "START":
@@ -755,16 +789,8 @@ void HandleCommand(string arg)
             break;
 
         case "DEPART":
-            // Ship: release the current dock now (manual trigger / override). Base:
-            // broadcast the request to the shuttle(s) - "DEPART" for all, or
-            // "DEPART <shipName>" to target one.
-            if (role == Role.Base)
-            {
-                string who = parts.Length > 1 ? parts[1] : "*";
-                IGC.SendBroadcastMessage(channel, "CMD|DEPART|" + who);
-                statusMsg = "Sent DEPART to " + (who == "*" ? "all shuttles" : who);
-            }
-            else RequestDepart();
+            // Release the current dock now (manual trigger / override for the tower gate).
+            RequestDepart();
             break;
 
         case "RESUME":
@@ -792,6 +818,13 @@ void HandleCommand(string arg)
             if (parts.Length > 1) DeleteRoute(raw[1]);
             else statusMsg = "Usage: DELROUTE <name>";
             break;
+
+        // NOTE: station SETUP commands (REGPAD / REGZONE / REGPATH) live in the SkippyTower
+        // teach helper now, not here. SkippyFlight is flight-only; run SkippyTower in teach
+        // mode on a second PB to record a station's pads, zone, and interior paths. This ship
+        // still CONSUMES what the tower advertises (heartbeat zone geometry, relayed pad pose
+        // and interior path) - it just no longer authors it. RECORD ZONE below is a flight-route
+        // concern (marking a route whose destination is a zone) and stays.
 
         // ---- LCD menu navigation (bind these to cockpit toolbar buttons) ----
         case "UP":    MenuMove(-1); break;
@@ -867,6 +900,34 @@ void RecordDest(string name = "")
     statusMsg = "Saved '" + activeRoute + "': " + homeConn + " -> " + destConn + " (" + path.Count + "wp)";
 }
 
+// RECORD ZONE finalizes a route whose destination is a tower holding zone (Scenario 2) rather than
+// an owned connector. The ship is loitering in open space inside the zone - there is no connector to
+// dock, so we snapshot the live RC pose as destPose (ConnFwd = our nose, so HoldPoint math still
+// gives a sane cruise aim point) and set destZone. Cruise aims at HoldPoint(destPose) but arrival is
+// ALSO satisfied by InZone; the tower then assigns a pad and streams the interior path.
+void RecordZone()
+{
+    if (phase != PhaseId.Recording) { statusMsg = "RECORD ZONE: run RECORD HOME first"; return; }
+    destPose = new DockPose
+    {
+        Pos = rc.GetPosition(),
+        Fwd = rc.WorldMatrix.Forward,
+        Up = rc.WorldMatrix.Up,
+        ConnFwd = rc.WorldMatrix.Forward,
+        BaseGridId = towerGrid,   // the zone exists only because a tower advertised it, so stamp the governing grid here; this scopes the zone route's clearance to that tower (0 if none heard yet)
+        Grav = rc.GetNaturalGravity().Length()
+    };
+    destConn = "ZONE";
+    destZone = true;
+    if (path.Count == 0 || Vector3D.Distance(path[path.Count - 1], destPose.Pos) > 5)
+        AddCrumb(rc.GetPosition());
+    haveRoute = true;
+    activeRoute = recordName != "" ? recordName : "Main";
+    SwitchPhase(PhaseId.Idle);
+    SaveRoute();
+    statusMsg = "Saved '" + activeRoute + "': " + homeConn + " -> ZONE (" + path.Count + "wp)";
+}
+
 // Snapshot the exact docked attitude so it can be reproduced later, on any ship.
 DockPose CapturePose(IMyShipConnector c)
 {
@@ -885,6 +946,11 @@ DockPose CapturePose(IMyShipConnector c)
         Grav = rc.GetNaturalGravity().Length()
     };
 }
+
+// The terminal destination pose to steer to: the tower-assigned pad (pad-bank mode) when
+// one has been granted this arrival, else our own recorded destPose. Gravity/scenario is
+// always read off destPose, so this only overrides the terminal approach geometry.
+DockPose DestP() { return asg ? asgPose : destPose; }
 
 void TickRecording()
 {
@@ -1062,7 +1128,7 @@ void TickUndock()
 {
     bool fromHome = leg.Outbound;
     var c = GetConnector(fromHome ? homeConn : destConn);
-    DockPose p = fromHome ? homePose : destPose;
+    DockPose p = fromHome ? homePose : DestP();   // at dest we sit on the tower-assigned pad; back off from THAT pose, not the generic recorded one
 
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
     {
@@ -1104,8 +1170,22 @@ void TickUndock()
 void TickDepartStaging()
 {
     bool fromHome = leg.Outbound;
-    DockPose p = fromHome ? homePose : destPose;
-    Vector3D staging = HoldPoint(p);
+    DockPose p = fromHome ? homePose : DestP();   // stage off the assigned pad when leaving the station
+
+    // Zone egress (Scenario 2): leaving a tower pad on a zone route with a relayed interior path.
+    // Thread the pad->zone path in REVERSE with the cruise follower (capped at dockSpeed) before the
+    // normal staging turn, so we snake back out of the structure instead of flying a straight line
+    // through a wall. On arrival we loiter at the zone exit and let the staging logic aim us at cruise.
+    if (!fromHome && destZone && asgPathReady && !interiorDone)
+    {
+        if (!interior) ArmInterior(true);
+        if (!RunCruiseControl()) { statusMsg = "Threading out to zone"; return; }
+        interior = false; interiorDone = true;
+        loiterPos = rc.GetPosition(); haveLoiter = true;
+        ReleaseControl();
+    }
+
+    Vector3D staging = (!fromHome && destZone && interiorDone && haveLoiter) ? loiterPos : HoldPoint(p);
     double distToFix = Vector3D.Distance(rc.GetPosition(), staging);
 
     // Latch "reached the staging fix" with hysteresis: arm at <3 m and, once armed, only
@@ -1222,6 +1302,20 @@ void RunCruiseFamily()
     bool done = RunCruiseControl();
     statusMsg = CruiseStatus();
 
+    // Zone destination (Scenario 2): the cruise leg still aims at HoldPoint(destPose), but arrival
+    // is ALSO satisfied the instant we cross into the tower's advertised holding box - whichever
+    // comes first. Capture the entry point as the loiter spot so a queue of ships spreads out inside
+    // the volume instead of stacking on one pin, then hand to Holding to request a pad + interior path.
+    if (leg.Outbound && destZone && InZone(rc.GetPosition()))
+    {
+        loiterPos = rc.GetPosition(); haveLoiter = true;
+        cruiseArmed = false;
+        ReleaseControl();
+        SwitchPhase(PhaseId.Holding);
+        phaseTimer = 0;
+        return;
+    }
+
     if (done)
     {
         // Reached the arrival holding fix -> hand to the holding/clearance controller.
@@ -1250,6 +1344,7 @@ void RunCruiseFamily()
 // cruiseSpeed ceiling) always has enough braking margin - no profile rebuild on transition.
 double CruiseCap()
 {
+    if (interior) return dockSpeed;   // threading a tower interior path: creep at docking speed, walls are close
     if (phase == PhaseId.Climb) return climbSpeed;
     if (phase == PhaseId.Descent) return descentSpeed;
     return cruiseSpeed;
@@ -1410,18 +1505,47 @@ void ArmCruise(bool toDest)
     cruiseProgTimer = 0;
     cruiseBestDist = double.MaxValue;
     dockBlockTimer = 0; dockClearFor = 0;   // fresh leg: clear any stale dock-clearance hold state
+    interior = false;                        // a cruise leg is never an interior thread; CruiseCap uses the phase governor
     cruiseArmed = true;
     cruiseArmedToDest = toDest;
     statusMsg = toDest ? "Cruising to destination" : "Cruising home";
 }
 
-// Build the flight-ordered waypoint list for a leg: the recorded crumbs (forward
+// Load the tower-relayed interior path into the SAME cruise follower that flies cruise
+// breadcrumbs, so the last mile through a structure needs no new flight law - just a lower
+// speed cap (CruiseCap returns dockSpeed while `interior` is set). Inbound (reversed=false):
+// follow the recorded zone->pad trail and append the assigned pad's dock Pos as the final
+// waypoint, so the follower drives right down onto the connector line before Taxi connects.
+// Egress (reversed=true): follow it pad->zone (reversed) and stop at the zone end. The velocity
+// profile is rebuilt for this short path (corners slow, arrive slow); cruiseArmed stays false
+// because an interior thread is driven directly by Taxi/DepartStaging, not RunCruiseFamily.
+void ArmInterior(bool reversed)
+{
+    legWps.Clear();
+    if (reversed)
+        for (int i = asgPath.Count - 1; i >= 0; i--) legWps.Add(asgPath[i]);
+    else
+    {
+        for (int i = 0; i < asgPath.Count; i++) legWps.Add(asgPath[i]);
+        legWps.Add(DestP().Pos);   // finish on the assigned pad's dock point (inbound only)
+    }
+    if (legWps.Count == 0) legWps.Add(rc.GetPosition());   // defensive: never leave the follower with no target
+    BuildVelocityProfile();
+    cruiseIdx = 0;
+    cruiseProgTimer = 0;
+    cruiseBestDist = double.MaxValue;
+    interior = true;
+    cruiseArmed = false;
+}
+
+
 // for the outbound leg, reversed for the return) minus any that sit inside either
 // dock's holding-fix radius, then the arrival HOLDING FIX as the final target.
 // Cruise now hands off to Holding at the outer fix, never onto the connector.
 void BuildLeg(bool toDest)
 {
     legWps.Clear();
+    if (toDest) { asg = false; asgPath.Clear(); asgPathReady = false; }   // fresh trip to the station: drop any prior pad assignment AND its interior path; a new one arrives with this arrival's LAND grant + CMD|PATH stream
     DockPose from = toDest ? homePose : destPose;
     DockPose to   = toDest ? destPose : homePose;
     double skipFrom = EffHoldDist(from) + 3;   // drop crumbs inside either holding fix
@@ -1667,7 +1791,30 @@ bool RunCruiseControl()
 void TickHolding()
 {
     bool toDest = leg.Outbound;
-    DockPose p = toDest ? destPose : homePose;
+    DockPose p = toDest ? DestP() : homePose;
+
+    // Zone destination (Scenario 2): loiter INSIDE the advertised box - wherever we entered it, so a
+    // queue spreads out naturally - and ask the tower to LAND. The grant carries the assigned pad pose
+    // (asg) and the tower streams that pad's interior path (asgPathReady); once both are in hand we
+    // thread in via Taxi. Station-keep at the captured entry point with a benign heading (no dock-
+    // attitude demand in open space). If the tower grants but never streams a path (open-air pad, a
+    // legacy tower, or dropped chunks) we still commit after PATH_WAIT_SEC and Taxi uses its straight
+    // line. This branch never runs the corridor/reorient gate below - the seam is the zone, not a fix.
+    if (toDest && destZone)
+    {
+        if (!haveLoiter) { loiterPos = rc.GetPosition(); haveLoiter = true; }
+        StationKeep(loiterPos);
+        AlignTo(rc.WorldMatrix.Forward, rc.WorldMatrix.Up, true);   // hold current heading, gyros inert
+        if (!ClearedToProceed("LAND", destConn))
+        { zoneWait = 0; statusMsg = "Loitering in zone - " + TowerWait("LAND"); return; }
+        zoneWait += dt;
+        if (!asgPathReady && zoneWait < PATH_WAIT_SEC)
+        { statusMsg = "Cleared - awaiting interior path"; return; }
+        phaseTimer = 0;
+        SwitchPhase(PhaseId.Taxi);
+        return;
+    }
+
     Vector3D fix = HoldPoint(p);
     Vector3D grav = rc.GetNaturalGravity();
     bool inGrav = grav.LengthSquared() > 1e-3;
@@ -1739,7 +1886,7 @@ void TickTaxi()
 {
     bool toDest = leg.Outbound;
     var c = GetConnector(toDest ? destConn : homeConn);
-    DockPose p = toDest ? destPose : homePose;
+    DockPose p = toDest ? DestP() : homePose;
 
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
     {
@@ -1754,6 +1901,19 @@ void TickTaxi()
         c.Connect();   // magnet range reached; keep steering until Connected confirms next tick
 
     if (rc.IsAutoPilotEnabled) AbortAutopilot();
+
+    // Interior thread (Scenario 2 inbound): before the straight-line final commit, follow the
+    // tower-relayed zone->pad path with the cruise follower (capped at dockSpeed) so the last mile
+    // snakes through the structure instead of punching a wall. Only on the outbound leg into a zone
+    // destination that actually relayed a path; an open-air pad (no path) drops straight through to
+    // the straight-line taxi below (backward compatible). interiorDone latches it to once per leg.
+    if (toDest && destZone && asgPathReady && !interiorDone)
+    {
+        if (!interior) ArmInterior(false);
+        if (!RunCruiseControl()) { statusMsg = "Threading to pad"; return; }
+        interior = false; interiorDone = true;
+        ReleaseControl();
+    }
 
     if (DockCorridorBlocked(p))
     {
@@ -1871,7 +2031,6 @@ double AlignTo(Vector3D targetFwd, Vector3D targetUp, double maxRad, bool coastH
     }
     Vector3D err = fErr + uErr;   // combined world-space rotation axis * angle
     double attErr = fErr.Length() + uErr.Length();
-    lastAlignErr = attErr;        // latch for the telem view (attitude-stall diagnosis)
 
     Vector3D angVel = rc.GetShipVelocities().AngularVelocity;   // world rad/s
 
@@ -2309,7 +2468,6 @@ string NormalizeView(string v)
         case VIEW_MENU:   return VIEW_MENU;
         case VIEW_STATUS: return VIEW_STATUS;
         case VIEW_TRIP:   return VIEW_TRIP;
-        case VIEW_TELEM:  return VIEW_TELEM;
         default:          return VIEW_FULL;
     }
 }
@@ -2394,9 +2552,23 @@ double CargoFillPct()
 }
 
 // ---- Tower clearance -------------------------------------------------------
-// True only while an opted-in ship is hearing a live tower. No heartbeat within
-// TOWER_TIMEOUT (or useTower off) => independent operation on the local gate alone.
-bool TowerActive() { return useTower && towerAge < TOWER_TIMEOUT; }
+// True only while an opted-in ship is hearing a live tower that governs `target` (the grid this
+// gate concerns). No heartbeat within TOWER_TIMEOUT, useTower off, or a live tower on a DIFFERENT
+// grid => independent operation on the local gate alone, so a foreign tower can't gate this ship.
+bool TowerActive(long target) { return useTower && towerAge < TOWER_TIMEOUT && GridMatch(towerGrid, target); }
+
+// Two grid ids agree when they're equal, or either is 0 (legacy tower / legacy-or-unstamped route):
+// the fallback preserves pre-grid-scoping behavior rather than stranding a ship that can't match.
+bool GridMatch(long a, long b) { return a == 0 || b == 0 || a == b; }
+
+// The grid this leg's gate concerns: the dock we're heading to (LAND) or leaving (DEPART). On an
+// outbound leg we depart home and land at dest; on an inbound leg it's reversed. Ties clearance to
+// the tower on that grid so only the right tower governs each move.
+long TargetGrid(bool forLanding)
+{
+    bool wantDest = forLanding ? leg.Outbound : !leg.Outbound;
+    return wantDest ? destPose.BaseGridId : homePose.BaseGridId;
+}
 
 // The single gate the flight loop consults before committing to a controlled move
 // (undock, or taxi onto a connector). Returns true to proceed. When a tower is live
@@ -2405,11 +2577,13 @@ bool TowerActive() { return useTower && towerAge < TOWER_TIMEOUT; }
 // the connector for the tower's benefit.
 bool ClearedToProceed(string action, string dock)
 {
-    if (!TowerActive()) return true;                    // no tower / disabled -> proceed independently
+    long target = TargetGrid(action == "LAND");
+    if (!TowerActive(target)) return true;              // no governing tower / disabled -> proceed independently
     if (cleared && reqAction == action) return true;    // granted for this action
     if (!clearanceRequested || reqTimer >= REQ_RESEND)
     {
-        IGC.SendBroadcastMessage(channel, "CMD|REQ|" + shipName + "|" + action + "|" + dock);
+        // Append the target grid so only the tower that owns it answers; legacy towers ignore the field.
+        IGC.SendBroadcastMessage(channel, "CMD|REQ|" + shipName + "|" + action + "|" + dock + "|" + target);
         // Fresh request => not yet granted for it. Clearing here (not just in SwitchPhase) drops
         // any stale grant left over when the action changes within a phase, so a leftover DEPART
         // clear can never satisfy a LAND gate.
@@ -2445,12 +2619,87 @@ void DrainIgc()
             if (who == "*" || who.Equals(shipName, StringComparison.OrdinalIgnoreCase))
                 RequestDepart();
         }
-        else if (f[1] == "TOWER") towerAge = 0;   // heartbeat: a tower is live on this channel
-        else if (f[1] == "CLEAR" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
-        { cleared = true; holdReason = ""; }
-        else if (f[1] == "HOLD" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction)
+        else if (f[1] == "TOWER")
+        {
+            // Extended heartbeat: CMD|TOWER|<zone>|<gridId>[|<center>|<fwd>|<up>|<ext>].
+            // Grid scoping: only adopt a heartbeat relevant to THIS ship - one whose grid matches our
+            // route's home or dest, a legacy tower (grid 0), or when we have no dest route yet (dg==0,
+            // e.g. teaching/discovery). A foreign tower's beats are ignored so they can't keep towerAge
+            // fresh or flip towerGrid, and thus can't govern a ship bound elsewhere.
+            long g = f.Length >= 4 ? ParseLong(f[3]) : 0;
+            long hg = homePose.BaseGridId, dg = destPose.BaseGridId;
+            if (g == 0 || dg == 0 || g == hg || g == dg)
+            {
+                towerAge = 0; towerGrid = g;   // heartbeat from a tower we care about
+                // Zone box now sits at f[4..7] (after the grid id). Old towers omit it.
+                // (& not && so every out-param is assigned before the guard short-circuits.)
+                if (f.Length >= 8 && (TryVec(f[4], out zoneCenter) & TryVec(f[5], out zoneFwd)
+                    & TryVec(f[6], out zoneUp) & TryVec(f[7], out zoneExt)))
+                    haveZone = true;
+            }
+        }
+        else if (f[1] == "CLEAR" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction && GridMatch(towerGrid, TargetGrid(reqAction == "LAND")))
+        {
+            cleared = true; holdReason = "";
+            // Pad-bank LAND grant: CMD|CLEAR|<ship>|LAND|<pad>|<pos>|<fwd>|<up>|<connFwd> (9 fields).
+            // Adopt the assigned pad pose for the terminal approach; gravity/scenario stays
+            // on our own recorded destPose (same station). A pad-less grant leaves asg false.
+            // (& not && on the TryVecs so all four out-params are always assigned.)
+            if (reqAction == "LAND" && f.Length >= 9
+              && (TryVec(f[5], out asgPose.Pos) & TryVec(f[6], out asgPose.Fwd)
+                & TryVec(f[7], out asgPose.Up)  & TryVec(f[8], out asgPose.ConnFwd)))
+            {
+                asgPose.Grav = destPose.Grav;
+                asgPose.BaseGridId = destPose.BaseGridId;
+                asgPose.HoldDist = destPose.HoldDist;
+                asg = true;
+            }
+        }
+        else if (f[1] == "HOLD" && f.Length >= 4 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase) && f[3] == reqAction && GridMatch(towerGrid, TargetGrid(reqAction == "LAND")))
         { cleared = false; holdReason = f.Length >= 5 ? f[4] : "hold"; }
+        // Interior-path relay from the tower, chunked: CMD|PATH|<ship>|<seq>|<total>|<v>;<v>;...
+        // Streamed right after a LAND or DEPART grant. Reassembled into asgPath; asgPathReady on the
+        // last chunk. On LAND the ship threads it inbound; on DEPART it reverses it out to the zone.
+        else if (f[1] == "PATH" && f.Length >= 6 && f[2].Equals(shipName, StringComparison.OrdinalIgnoreCase))
+            OnPathChunk(f[3], f[4], f[5]);
     }
+}
+
+// Reassemble a chunked interior path (CMD|PATH). seq 0 (or an empty buffer) starts fresh; each
+// chunk's ';'-joined Vecs are appended; the last chunk (seq==total-1) commits to asgPath and arms
+// the follower. A dropped middle chunk just leaves asgPathReady false -> Taxi falls back to straight
+// line (never a crash). TryVec skips any malformed token rather than aborting the whole path.
+void OnPathChunk(string seqS, string totalS, string payload)
+{
+    int seq = ParseInt(seqS, 0), total = ParseInt(totalS, 1);
+    if (seq == 0 || asgPathRx.Count == 0) asgPathRx.Clear();
+    if (payload.Length > 0)
+    {
+        var parts = payload.Split(';');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            Vector3D v;
+            if (parts[i].Length > 0 && TryVec(parts[i], out v)) asgPathRx.Add(v);
+        }
+    }
+    if (seq >= total - 1)
+    {
+        asgPath = new List<Vector3D>(asgPathRx);
+        asgPathReady = asgPath.Count > 0;
+    }
+}
+
+// Is world point p inside the tower's holding-zone box? Transform the offset into zone-local axes
+// (right = fwd x up) and test each against the half-extents. No zone advertised -> never "in zone",
+// so a zone-destination route without a live tower simply never auto-parks.
+bool InZone(Vector3D p)
+{
+    if (!haveZone) return false;
+    Vector3D d = p - zoneCenter;
+    Vector3D right = Vector3D.Cross(zoneFwd, zoneUp);
+    return Math.Abs(d.Dot(right)) <= zoneExt.X
+        && Math.Abs(d.Dot(zoneUp)) <= zoneExt.Y
+        && Math.Abs(d.Dot(zoneFwd)) <= zoneExt.Z;
 }
 
 // Manual "Depart Now" (ship button / station IGC). Two cases:
@@ -2867,7 +3116,6 @@ string BuildView(string view)
         case VIEW_MENU:   return BuildMenu();
         case VIEW_STATUS: return BuildStatus();
         case VIEW_TRIP:   return BuildTrip();
-        case VIEW_TELEM:  return BuildTelem();
         default:          return BuildHeader() + BuildMenu();   // full
     }
 }
@@ -2936,71 +3184,6 @@ string BuildTrip()
         sb.Append("ETA ").Append(FormatEta()).Append("  ")
           .Append((RemainingDistance() / 1000.0).ToString("0.0")).Append("km\n");
     sb.Append(statusMsg);
-    return sb.ToString();
-}
-
-// Debug telemetry view: the flight-law signals that explain a bad climb, cruise, or
-// descent - phase timer, speed vs the governor cap, vertical rate, altitude, the
-// gravity magnitude that drives the atmo<->space handoff, waypoint progress, attitude
-// error, and fuel. It is opt-in by assignment: point a dedicated surface at it (a panel
-// named [SF:telem], or a cockpit's [sf-screens] "0 = telem") and it never
-// touches the main info screen.
-string BuildTelem()
-{
-    var sb = new StringBuilder();
-    sb.Append("-- Telemetry --\n");
-    if (rc == null) { sb.Append("no remote control"); return sb.ToString(); }
-
-    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
-    Vector3D grav = rc.GetNaturalGravity();
-    double gMag = grav.Length();
-    double spd = rc.GetShipSpeed();
-
-    // Phase + time-in-phase (with leg direction) and run flag.
-    sb.Append(ShipState()).Append(operating ? " [RUN]" : " [STOP]")
-      .Append("  t=").Append(phaseTimer.ToString("0.0")).Append("s\n");
-
-    // Speed vs the governor's cap at the current waypoint (cap shown only while cruising).
-    // The cap is the lower of the waypoint profile and the active Cruise/Climb/Descent governor.
-    sb.Append("Spd ").Append(spd.ToString("0.0")).Append("m/s");
-    if (cruiseArmed && cruiseIdx < legVmax.Count)
-        sb.Append(" /").Append(Math.Min(CruiseCap(), legVmax[cruiseIdx]).ToString("0")).Append("cap");
-    sb.Append('\n');
-
-    // Vertical rate along gravity-up (climb +, descent -); blank in space.
-    if (gMag > 1e-3)
-    {
-        Vector3D up = -grav / gMag;
-        double vrate = vel.Dot(up);
-        sb.Append("VS  ").Append(vrate >= 0 ? "+" : "").Append(vrate.ToString("0.0")).Append("m/s\n");
-    }
-    else sb.Append("VS  (space)\n");
-
-    // Gravity magnitude - the atmo<->space boundary the flight law pivots on.
-    sb.Append("Grav ").Append(gMag.ToString("0.00")).Append("m/s2 ")
-      .Append((gMag / 9.81).ToString("0.00")).Append("g\n");
-
-    // Surface altitude where a planet is beneath us.
-    double surf;
-    if (rc.TryGetPlanetElevation(MyPlanetElevation.Surface, out surf))
-        sb.Append("Alt ").Append(surf.ToString("0")).Append("m\n");
-    else
-        sb.Append("Alt --\n");
-
-    // Waypoint progress + straight-line remaining distance.
-    if (cruiseArmed && legWps.Count > 0)
-        sb.Append("WP ").Append(cruiseIdx + 1).Append('/').Append(legWps.Count)
-          .Append("  ").Append((RemainingDistance() / 1000.0).ToString("0.00")).Append("km\n");
-    else
-        sb.Append("WP --\n");
-
-    // Attitude error (approx deg) - a value stuck high flags an align stall.
-    sb.Append("Att ").Append((lastAlignErr * 57.2958).ToString("0.0")).Append("deg\n");
-
-    // Fuel reserves (n/a when the ship carries none of that resource).
-    double h2 = HydrogenPct(), batt = BatteryPct();
-    sb.Append("H2 ").Append(h2 < 0 ? "n/a" : h2.ToString("0") + "%")
-      .Append("  Bat ").Append(batt < 0 ? "n/a" : batt.ToString("0") + "%");
     return sb.ToString();
 }
 
@@ -3101,85 +3284,6 @@ void Broadcast()
 }
 
 // ============================================================================
-//  Base role - listen & render
-// ============================================================================
-class ShuttleReport
-{
-    public string Name, State;
-    public int EtaSec, DistM, Fill;
-    public double MassT;
-    public bool Running;
-    public double Age;   // seconds since last update
-}
-
-void RunBase()
-{
-    if (listener == null) listener = IGC.RegisterBroadcastListener(channel);
-
-    while (listener.HasPendingMessage)
-    {
-        var m = listener.AcceptMessage();
-        var s = m.Data as string;
-        if (s == null) continue;
-        var f = s.Split('|');
-        if (f.Length < 7) continue;
-        var r = new ShuttleReport
-        {
-            Name = f[0],
-            State = f[1],
-            EtaSec = ParseInt(f[2], -1),
-            DistM = ParseInt(f[3], 0),
-            Fill = ParseInt(f[4], 0),
-            MassT = ParseDouble(f[5], 0),
-            Running = f[6] == "1",
-            Age = 0
-        };
-        fleet[r.Name] = r;
-    }
-
-    foreach (var r in fleet.Values) r.Age += dt;
-
-    var sb = new StringBuilder();
-    sb.Append("== Shuttle Board v").Append(VERSION).Append(" ==\n\n");
-    if (fleet.Count == 0) sb.Append("Waiting for shuttle signal...\n");
-    foreach (var r in fleet.Values)
-    {
-        if (r.Age > 20) { sb.Append(r.Name).Append(": NO SIGNAL (").Append((int)r.Age).Append("s)\n\n"); continue; }
-        sb.Append(r.Name).Append(": ").Append(PrettyState(r.State)).Append('\n');
-        if (r.EtaSec >= 0)
-            sb.Append("   ETA ").Append((r.EtaSec / 60).ToString("00")).Append(':').Append((r.EtaSec % 60).ToString("00"))
-              .Append("   ").Append((r.DistM / 1000.0).ToString("0.0")).Append(" km\n");
-        sb.Append("   Cargo ").Append(r.Fill).Append("%   ").Append(r.MassT.ToString("0.0")).Append("t\n\n");
-    }
-
-    var text = sb.ToString();
-    Echo(text);
-    var panels = new List<IMyTextPanel>();
-    // Same-construct only: when a shuttle docks here the connector merges terminal
-    // systems, so an unscoped query would overwrite the visiting ship's own [SF] panels.
-    GridTerminalSystem.GetBlocksOfType(panels, b => b.CubeGrid.IsSameConstructAs(Me.CubeGrid) && b.CustomName.Contains(lcdTag));
-    foreach (var p in panels) { p.ContentType = ContentType.TEXT_AND_IMAGE; p.WriteText(text); }
-    Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
-    Me.GetSurface(0).WriteText(text);
-}
-
-string PrettyState(string s)
-{
-    switch (s)
-    {
-        case "Loading":      return "Loading at home";
-        case "CruiseToDest": return "En route to station";
-        case "ApproachDest": return "Docking at station";
-        case "Unloading":    return "Unloading at station";
-        case "CruiseToHome": return "Returning home";
-        case "ApproachHome": return "Docking at home";
-        case "Idle":         return "Idle";
-        case "Faulted":      return "FAULT - needs attention";
-        default:             return s;
-    }
-}
-
-// ============================================================================
 //  Persistence & config
 // ============================================================================
 void WriteConfigTemplate()
@@ -3202,30 +3306,6 @@ void BackfillConfig()
     Me.CustomData = ini.ToString();
 }
 
-// A base/station board only ever reads role, shipName, channel and lcdTag - the
-// flight/cargo/fuel keys are meaningless to it. Rewrite the [sf] section with
-// just those four so a board's Custom Data isn't cluttered with irrelevant tuning
-// (e.g. a block first compiled as a shuttle, then switched to base). Other sections
-// are left untouched. Runs on compile for the base role only.
-void TrimBaseConfig()
-{
-    var ini = new MyIni();
-    ini.TryParse(Me.CustomData);
-    ini.DeleteSection("sf");
-    WriteBaseSection(ini);
-    Me.CustomData = ini.ToString();
-}
-
-// Write the minimal base-role key set. Normalizes the role to "base" (so a
-// "station" alias is rewritten cleanly).
-void WriteBaseSection(MyIni ini)
-{
-    ini.Set("sf", "role", "base");
-    ini.Set("sf", "shipName", shipName);
-    ini.Set("sf", "channel", channel);
-    ini.Set("sf", "lcdTag", lcdTag);
-}
-
 // Write the full [sf] key set from the current field values into an ini,
 // leaving all other sections untouched. Shared by the first-run template and the
 // on-compile backfill.
@@ -3233,7 +3313,6 @@ void WriteShuttleSection(MyIni ini)
 {
     string modeStr = runMode == RunMode.OneTrip ? "ONETRIP"
                    : runMode == RunMode.OneWay ? "ONEWAY" : "CONTINUOUS";
-    ini.Set("sf", "role", role == Role.Base ? "base" : "shuttle");
     ini.Set("sf", "shipName", shipName);
     ini.Set("sf", "channel", channel);
     ini.Set("sf", "useTower", useTower ? "auto" : "off");
@@ -3276,9 +3355,6 @@ void LoadConfig()
     var ini = new MyIni();
     if (!ini.TryParse(Me.CustomData)) return;
     MigrateLegacyConfig(ini);       // one-time [shuttle] -> [sf]
-    // Role: "base" (or its alias "station") renders the board; anything else flies.
-    string roleStr = ini.Get("sf", "role").ToString("shuttle").Trim().ToLowerInvariant();
-    role = (roleStr == "base" || roleStr == "station") ? Role.Base : Role.Shuttle;
     shipName = ini.Get("sf", "shipName").ToString(shipName);
     channel = ini.Get("sf", "channel").ToString(channel);
     useTower = ini.Get("sf", "useTower").ToString(useTower ? "auto" : "off").Trim().ToLowerInvariant() == "auto";
@@ -3390,6 +3466,8 @@ void WriteRoute(MyIni ini, string name)
     // Natural-gravity magnitude at each dock, for leg-scenario classification (0 = space).
     ini.Set(s, "homeG", homePose.Grav);
     ini.Set(s, "destG", destPose.Grav);
+    // Destination is a tower holding zone (Scenario 2), not an owned dock: arrival = InZone.
+    ini.Set(s, "destZone", destZone ? "1" : "0");
     var sb = new StringBuilder();
     for (int i = 0; i < path.Count; i++) { if (i > 0) sb.Append(';'); sb.Append(Vec(path[i])); }
     ini.Set(s, "path", sb.ToString());
@@ -3485,6 +3563,9 @@ void LoadRouteInto(MyIni ini, string name)
     // space, so an un-re-recorded route stays SpaceLocal (today's single-Cruise behavior).
     homePose.Grav = ini.Get(s, "homeG").ToDouble(0);
     destPose.Grav = ini.Get(s, "destG").ToDouble(0);
+
+    // Zone destination flag; absent on pre-0.12 routes -> false (owned-dock behavior unchanged).
+    destZone = ini.Get(s, "destZone").ToString("0") == "1";
 
     path.Clear();
     var raw = ini.Get(s, "path").ToString("");
@@ -3684,4 +3765,5 @@ bool TryVec(string s, out Vector3D v)
 }
 
 int ParseInt(string s, int def) { int r; return int.TryParse(s, out r) ? r : def; }
+long ParseLong(string s) { long r; return long.TryParse(s, out r) ? r : 0; }
 double ParseDouble(string s, double def) { double r; return double.TryParse(s, out r) ? r : def; }
