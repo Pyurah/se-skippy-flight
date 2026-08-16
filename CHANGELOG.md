@@ -36,6 +36,13 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.15.1] - 2026-08-16
+
+### Changed
+- Renamed the gravity thrust-handoff status marker from the cryptic `!xfer` to `handoff`.
+  Same meaning (powered climb/descent while still inside a gravity well — status only, no
+  control change), clearer label.
+
 ## [0.15.0] - 2026-08-16
 
 ### Added

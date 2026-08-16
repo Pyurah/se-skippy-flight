@@ -90,7 +90,7 @@ namespace IngameScript
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.15.0";
+const string VERSION = "0.15.1";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
@@ -1413,7 +1413,7 @@ string CruiseStatus()
                 : phase == PhaseId.Descent ? "Descending" : "Cruising";
     // Danger-zone marker: powered climb/descent while still inside a gravity well - the
     // atmosphere/gravity thrust-handoff region. Status-only, no control change.
-    string xfer = InTransition() ? " !xfer" : "";
+    string xfer = InTransition() ? " handoff" : "";
     return verb + (toDest ? " to destination" : " home") + xfer;
 }
 

@@ -3,7 +3,7 @@
 // the deployed script by hand. Source of truth: SkippyFlight/Program.cs. Full docs in
 // README.md / CHANGELOG.md.
 // 
-const string A="0.15.0";enum E{B,C,D}enum J{F,G,H,I}struct R{public Vector3D K,L,M,N;public long O;public double P,Q;}
+const string A="0.15.1";enum E{B,C,D}enum J{F,G,H,I}struct R{public Vector3D K,L,M,N;public long O;public double P,Q;}
 enum f{S,T,U,V,W,X,Y,Z,a,b,c,d,e}struct h{public bool g;}enum l{i,j,Z,k}abstract class t{public abstract f m{get;}public
 abstract bool n{get;}public abstract string o{get;}public virtual void q(Program p){}public abstract void r(Program p);public
 virtual void s(Program p){}}class v:t{public override f m{get{return f.S;}}public override bool n{get{return false;}}public
@@ -121,14 +121,14 @@ GetNaturalGravity();if(ǣ.LengthSquared()>1e-3&&Ǥ()){Vector3D ǥ=Vector3D.Norma
 }void ǯ(){bool ǭ=y.g;if(!ǰ(ǭ)){Ǳ(ǭ);return;}Ě+=Ɓ;bool ǲ=Ǜ();æ=ǳ();if(y.g&&ì&&Ǵ(Ŋ.GetPosition())){ı=Ŋ.GetPosition();ú=true
 ;ǵ=false;ƌ();Ɩ(f.a);Ĕ=0;return;}if(ǲ){ǵ=false;ƌ();Ɩ(f.a);Ĕ=0;return;}if(Ě>=Ū){ǵ=false;ƌ();Ɩ(f.e);æ=
 "Cruise stuck - check thrust/gyro/geometry";return;}if(Ƕ())Ɩ(Ƿ());}double Ǹ(){if(ø)return ÿ;if(Ī==f.Y)return ý;if(Ī==f.Z)return þ;return ü;}bool ǹ(){return Ī==f.X
-||Ī==f.Y||Ī==f.Z;}string ǳ(){bool ǭ=y.g;string Ǻ=Ī==f.Y?"Climbing":Ī==f.Z?"Descending":"Cruising";string Ǽ=ǻ()?" !xfer":""
-;return Ǻ+(ǭ?" to destination":" home")+Ǽ;}bool ǻ(){return Ŋ!=null&&Ŋ.GetNaturalGravity().Length()>ų&&(Ī==f.Y||Ī==f.Z);}l
-Ȁ(double ǽ,double Ǿ){bool ǿ=ǽ>ų,Ʋ=Ǿ>ų;if(ǿ&&Ʋ)return l.i;if(ǿ&&!Ʋ)return l.j;if(!ǿ&&Ʋ)return l.Z;return l.k;}l ȁ(){double
-ǽ=y.g?Ĥ.Q:ĥ.Q;double Ǿ=y.g?ĥ.Q:Ĥ.Q;return Ȁ(ǽ,Ǿ);}f Ǭ(){ī=ȁ();return(ī==l.i||ī==l.j)?f.Y:f.X;}f Ƿ(){if(Ī==f.Y)return f.X;
-if(Ī==f.X)return f.Z;return Ī;}bool Ȃ(out double ƿ){ƿ=0;return Ŋ!=null&&Ŋ.TryGetPlanetElevation(MyPlanetElevation.Sealevel
-,out ƿ);}bool Ƕ(){if(Ŋ==null)return false;double ȃ=Ŋ.GetNaturalGravity().Length();double Ȅ;bool ȅ=Ȃ(out Ȅ);ē=(ȅ&&í&&Ɓ>0)?
-(Ȅ-Ē)/Ɓ:0;Ē=Ȅ;í=ȅ;if(Ī==f.Y){if(ī==l.i){bool Ȇ=Vector3D.Distance(Ŋ.GetPosition(),Ĭ)>ŵ&&ē<Ŷ;Ä=Ȇ?Ä+Ɓ:0;return Ä>=Ŵ;}Ä=ȃ<ų?Ä
-+Ɓ:0;return Ä>=Ŵ;}if(Ī==f.X){if(ī==l.i){Ä=ē<-ŷ?Ä+Ɓ:0;return Ä>=Ŵ;}if(ī==l.Z){Ä=ȃ>ų?Ä+Ɓ:0;return Ä>=Ŵ;}return false;}
+||Ī==f.Y||Ī==f.Z;}string ǳ(){bool ǭ=y.g;string Ǻ=Ī==f.Y?"Climbing":Ī==f.Z?"Descending":"Cruising";string Ǽ=ǻ()?" handoff":
+"";return Ǻ+(ǭ?" to destination":" home")+Ǽ;}bool ǻ(){return Ŋ!=null&&Ŋ.GetNaturalGravity().Length()>ų&&(Ī==f.Y||Ī==f.Z);}
+l Ȁ(double ǽ,double Ǿ){bool ǿ=ǽ>ų,Ʋ=Ǿ>ų;if(ǿ&&Ʋ)return l.i;if(ǿ&&!Ʋ)return l.j;if(!ǿ&&Ʋ)return l.Z;return l.k;}l ȁ(){
+double ǽ=y.g?Ĥ.Q:ĥ.Q;double Ǿ=y.g?ĥ.Q:Ĥ.Q;return Ȁ(ǽ,Ǿ);}f Ǭ(){ī=ȁ();return(ī==l.i||ī==l.j)?f.Y:f.X;}f Ƿ(){if(Ī==f.Y)return f.
+X;if(Ī==f.X)return f.Z;return Ī;}bool Ȃ(out double ƿ){ƿ=0;return Ŋ!=null&&Ŋ.TryGetPlanetElevation(MyPlanetElevation.
+Sealevel,out ƿ);}bool Ƕ(){if(Ŋ==null)return false;double ȃ=Ŋ.GetNaturalGravity().Length();double Ȅ;bool ȅ=Ȃ(out Ȅ);ē=(ȅ&&í&&Ɓ>0)
+?(Ȅ-Ē)/Ɓ:0;Ē=Ȅ;í=ȅ;if(Ī==f.Y){if(ī==l.i){bool Ȇ=Vector3D.Distance(Ŋ.GetPosition(),Ĭ)>ŵ&&ē<Ŷ;Ä=Ȇ?Ä+Ɓ:0;return Ä>=Ŵ;}Ä=ȃ<ų?
+Ä+Ɓ:0;return Ä>=Ŵ;}if(Ī==f.X){if(ī==l.i){Ä=ē<-ŷ?Ä+Ɓ:0;return Ä>=Ŵ;}if(ī==l.Z){Ä=ȃ>ų?Ä+Ɓ:0;return Ä>=Ŵ;}return false;}
 return false;}bool ȇ=false;bool ǵ=false;bool ǰ(bool ǭ){return ǵ&&ȇ==ǭ;}Vector3D ǘ(R p){return p.K-p.N*ċ;}double ȉ(R p){double
 Ȉ=p.P>0?p.P:Č;return Math.Max(Ȉ,ċ+5);}Vector3D ǜ(R p){return p.K-p.N*ȉ(p);}void Ǳ(bool ǭ){Ǯ(ǭ);if(Ķ.Count==0){Ɩ(f.e);æ=
 "Cruise: empty path - re-record route";return;}Ȋ();ī=ȁ();Ĭ=Ŋ.GetPosition();Ä=0;Ē=0;í=false;ē=0;ĸ=0;Ě=0;ě=double.MaxValue;Ë=0;Ì=0;ø=false;ǵ=true;ȇ=ǭ;æ=ǭ?
