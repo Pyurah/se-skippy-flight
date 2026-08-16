@@ -3,7 +3,7 @@
 // the deployed script by hand. Source of truth: SkippyFlight/Program.cs. Full docs in
 // README.md / CHANGELOG.md.
 // 
-const string A="0.15.1";enum E{B,C,D}enum J{F,G,H,I}struct R{public Vector3D K,L,M,N;public long O;public double P,Q;}
+const string A="0.15.2";enum E{B,C,D}enum J{F,G,H,I}struct R{public Vector3D K,L,M,N;public long O;public double P,Q;}
 enum f{S,T,U,V,W,X,Y,Z,a,b,c,d,e}struct h{public bool g;}enum l{i,j,Z,k}abstract class t{public abstract f m{get;}public
 abstract bool n{get;}public abstract string o{get;}public virtual void q(Program p){}public abstract void r(Program p);public
 virtual void s(Program p){}}class v:t{public override f m{get{return f.S;}}public override bool n{get{return false;}}public
@@ -165,38 +165,38 @@ Vector3D Ǧ=ɀ-ɀ.Dot(ǥ)*ǥ;ǟ=Ǧ.LengthSquared()>1e-6?Vector3D.Normalize(Ǧ):�
 "Dock blocked - gave up after "+đ.ToString("0")+"s";}return;}bool ǫ=Ǘ(ȿ,ǟ,Ǡ,1.0);if(Ë>0){Ì+=Ɓ;if(Ì<ź){æ=(ǭ?"Dock clearing at destination":
 "Dock clearing at home")+" - confirming";return;}Ë=0;}æ=(ǭ?"Holding at destination":"Holding at home")+" - cleared";if(ǫ){if(!Ǐ("LAND",ǭ?ã:â)){
 æ=(ǭ?"Holding at destination":"Holding at home")+" - "+ǐ("LAND");return;}Ĕ=0;Ɩ(f.b);}}void Ï(){bool ǭ=y.g;var Ƶ=ǖ(ǭ?ã:â);
-R p=ǭ?ƻ():Ĥ;if(Ƶ!=null&&Ƶ.Status==MyShipConnectorStatus.Connected){Ɨ();ƌ();Ƶ.Connect();Ĕ=0;ɂ();return;}if(Ƶ!=null&&Ƶ.
-Status==MyShipConnectorStatus.Connectable)Ƶ.Connect();if(Ŋ.IsAutoPilotEnabled)Ɨ();if(ǭ&&ì&&ö&&!ù){if(!ø)ǚ(false);if(!Ǜ()){æ=
-"Threading to pad";return;}ø=false;ù=true;ƌ();}if(Ɂ(p)){Ë=0;Ì=0;Ĕ=0;Ɩ(f.a);æ=ǭ?"Taxi aborted - corridor blocked at destination":
-"Taxi aborted - corridor blocked at home";return;}Ǘ(p.K,p.L,p.M,0.3);Ĕ+=Ɓ;æ=(ǭ?"Docking at destination":"Docking at home")+" ("+Vector3D.Distance(Ŋ.GetPosition()
-,p.K).ToString("0")+"m)";if(Ĕ>=ŝ){Ɨ();ƌ();Ɩ(f.e);æ="Docking timed out - check approach geometry";}}bool Ǘ(Vector3D ȝ,
-Vector3D ɀ,Vector3D ǧ,double Ƀ){ȣ(false);double ǩ=Ǩ(ɀ,ǧ);Vector3D Ǣ=ȝ-Ŋ.GetPosition();double ȧ=Ǣ.Length();Vector3D ǣ=Ŋ.
-GetNaturalGravity();double Ǉ=Ŋ.CalculateShipMass().PhysicalMass;Vector3D ȸ=Vector3D.Zero;if(ǩ<š&&ȧ>0.05){double Ʉ=Math.Min((double)ÿ,ȧ*Ş)
-;ȸ=Ǣ/ȧ*Ʉ;}Vector3D Ȥ=Ŋ.GetShipVelocities().LinearVelocity;Vector3D ȹ=ȸ-Ȥ;if(ȹ.Length()<Ų)ȹ=Vector3D.Zero;Ƚ(ȹ*Ǉ*ş-ǣ*Ǉ);
-return ȧ<=Ƀ&&ǩ<Š&&Ȥ.Length()<Ţ;}void Ǫ(Vector3D ȝ){ȣ(false);Vector3D Ǣ=ȝ-Ŋ.GetPosition();double ȧ=Ǣ.Length();Vector3D ǣ=Ŋ.
-GetNaturalGravity();double Ǉ=Ŋ.CalculateShipMass().PhysicalMass;Vector3D ȸ=Vector3D.Zero;if(ȧ>0.05){double Ʉ=Math.Min((double)ÿ,ȧ*Ş);ȸ=Ǣ/
-ȧ*Ʉ;}Vector3D Ȥ=Ŋ.GetShipVelocities().LinearVelocity;Vector3D ȹ=ȸ-Ȥ;if(ȹ.Length()<Ų)ȹ=Vector3D.Zero;Ƚ(ȹ*Ǉ*ş-ǣ*Ǉ);}double
-Ǩ(Vector3D Ʌ,Vector3D Ɇ)=>Ǩ(Ʌ,Ɇ,ɇ(),false);double Ǩ(Vector3D Ʌ,Vector3D Ɇ,bool Ɉ)=>Ǩ(Ʌ,Ɇ,ɇ(),Ɉ);double Ǩ(Vector3D Ʌ,
-Vector3D Ɇ,double ɉ,bool Ɉ){Vector3D ɀ=Ŋ.WorldMatrix.Forward,ǧ=Ŋ.WorldMatrix.Up;Vector3D Ɋ=ɀ.Cross(Ʌ);if(ɀ.Dot(Ʌ)<0.0){double ɋ=
-Ɋ.Length();Ɋ=ɋ>1e-6?Ɋ/ɋ:Vector3D.Normalize(ǧ);}Vector3D Ɍ=ǧ.Cross(Ɇ);if(ǧ.Dot(Ɇ)<0.0){double ɋ=Ɍ.Length();Ɍ=ɋ>1e-6?Ɍ/ɋ:
-Vector3D.Normalize(ɀ);}Vector3D ɍ=Ɋ+Ɍ;double Ɏ=Ɋ.Length()+Ɍ.Length();Ġ=Ɏ;Vector3D ɏ=Ŋ.GetShipVelocities().AngularVelocity;if(Ɉ){
-bool ɐ=ò?Ɏ<ů:(Ɏ<Ů&&ɏ.Length()<ŭ*2.0);if(ɐ){ò=true;ɑ();return Ɏ;}ò=false;}else{ò=false;if(Ɏ<Ŭ&&ɏ.Length()<ŭ){ɑ();return Ɏ;}}
-if(ɍ.Length()<ū)ɍ=Vector3D.Zero;Vector3D ɒ=ɍ*ď-ɏ*Đ;double ư=ɒ.Length();if(ư>ɉ&&ư>1e-6)ɒ*=ɉ/ư;foreach(var ɓ in Ŗ){if(ɓ==
-null||!ɓ.IsWorking)continue;Vector3D ɔ=Vector3D.TransformNormal(ɒ,MatrixD.Transpose(ɓ.WorldMatrix));ɓ.GyroOverride=true;ɓ.
-Pitch=(float)(-ɔ.X);ɓ.Yaw=(float)(-ɔ.Y);ɓ.Roll=(float)(-ɔ.Z);}return Ɏ;}void ɑ(){foreach(var ɓ in Ŗ)if(ɓ!=null&&ɓ.IsWorking){
-ɓ.GyroOverride=true;ɓ.Pitch=0f;ɓ.Yaw=0f;ɓ.Roll=0f;}}double ɇ(){double ɕ=Ā>0?Ā:(Me.CubeGrid.GridSizeEnum==MyCubeSize.Small
-?15.0:5.0);return ɕ*2.0*Math.PI/60.0;}void Ƚ(Vector3D ɖ){if(Ŋ==null)return;if(!ɗ(ɖ)){Ȼ();return;}double[]ȑ;MatrixD Ȓ;ȓ(
-out ȑ,out Ȓ);Vector3D ɘ=Vector3D.TransformNormal(ɖ,Ȓ);double[]ə=new double[6];ə[0]=Math.Max(0,ɘ.X);ə[1]=Math.Max(0,-ɘ.X);ə[
-2]=Math.Max(0,ɘ.Y);ə[3]=Math.Max(0,-ɘ.Y);ə[4]=Math.Max(0,ɘ.Z);ə[5]=Math.Max(0,-ɘ.Z);foreach(var Ʋ in ŗ){if(Ʋ==null||!Ʋ.
-IsWorking)continue;int ɛ=ɚ(Ʋ,Ȓ);if(ȑ[ɛ]<=1e-3||ə[ɛ]<=1e-3){Ʋ.ThrustOverride=0f;continue;}double ɜ=ə[ɛ]*(Ʋ.MaxEffectiveThrust/ȑ[ɛ]
-);Ʋ.ThrustOverride=(float)Math.Min(ɜ,Ʋ.MaxEffectiveThrust);}}static bool ɗ(Vector3D ɝ){return!double.IsNaN(ɝ.X)&&!double.
-IsNaN(ɝ.Y)&&!double.IsNaN(ɝ.Z)&&!double.IsInfinity(ɝ.X)&&!double.IsInfinity(ɝ.Y)&&!double.IsInfinity(ɝ.Z);}void ȓ(out double[
-]ȑ,out MatrixD Ȓ){Ȓ=MatrixD.Transpose(Ŋ.WorldMatrix);ȑ=new double[6];foreach(var Ʋ in ŗ)if(Ʋ!=null&&Ʋ.IsWorking)ȑ[ɚ(Ʋ,Ȓ)]
-+=Ʋ.MaxEffectiveThrust;}int ɚ(IMyThrust Ʋ,MatrixD Ȓ){Vector3D ɞ=Vector3D.TransformNormal(Ʋ.WorldMatrix.Backward,Ȓ);double
-ɟ=Math.Abs(ɞ.X),ɠ=Math.Abs(ɞ.Y),ɡ=Math.Abs(ɞ.Z);if(ɟ>=ɠ&&ɟ>=ɡ)return ɞ.X>=0?0:1;if(ɠ>=ɡ)return ɞ.Y>=0?2:3;return ɞ.Z>=0?4
-:5;}bool Ǥ(){if(à=="level")return true;if(à=="nose")return false;double[]ȑ;MatrixD Ȓ;ȓ(out ȑ,out Ȓ);double ǧ=ȑ[2],ɀ=ȑ[5];
-if(!ñ&&ǧ>ɀ*1.1)ñ=true;else if(ñ&&ǧ<ɀ*0.9)ñ=false;return ñ;}void ƌ(){foreach(var Ʋ in ŗ)if(Ʋ!=null)Ʋ.ThrustOverride=0f;
-foreach(var ɓ in Ŗ)if(ɓ!=null){ɓ.GyroOverride=false;ɓ.Pitch=0f;ɓ.Yaw=0f;ɓ.Roll=0f;}foreach(var ɢ in Ś)if(ɢ!=null)ɢ.
+R p=ǭ?ƻ():Ĥ;if(Ƶ!=null&&!Ƶ.Enabled)Ƶ.Enabled=true;if(Ƶ!=null&&Ƶ.Status==MyShipConnectorStatus.Connected){Ɨ();ƌ();Ƶ.
+Connect();Ĕ=0;ɂ();return;}if(Ƶ!=null&&Ƶ.Status==MyShipConnectorStatus.Connectable)Ƶ.Connect();if(Ŋ.IsAutoPilotEnabled)Ɨ();if(ǭ
+&&ì&&ö&&!ù){if(!ø)ǚ(false);if(!Ǜ()){æ="Threading to pad";return;}ø=false;ù=true;ƌ();}if(Ɂ(p)){Ë=0;Ì=0;Ĕ=0;Ɩ(f.a);æ=ǭ?
+"Taxi aborted - corridor blocked at destination":"Taxi aborted - corridor blocked at home";return;}Ǘ(p.K,p.L,p.M,0.3);Ĕ+=Ɓ;æ=(ǭ?"Docking at destination":
+"Docking at home")+" ("+Vector3D.Distance(Ŋ.GetPosition(),p.K).ToString("0")+"m)";if(Ĕ>=ŝ){Ɨ();ƌ();Ɩ(f.e);æ=
+"Docking timed out - check approach geometry";}}bool Ǘ(Vector3D ȝ,Vector3D ɀ,Vector3D ǧ,double Ƀ){ȣ(false);double ǩ=Ǩ(ɀ,ǧ);Vector3D Ǣ=ȝ-Ŋ.GetPosition();double ȧ=Ǣ.
+Length();Vector3D ǣ=Ŋ.GetNaturalGravity();double Ǉ=Ŋ.CalculateShipMass().PhysicalMass;Vector3D ȸ=Vector3D.Zero;if(ǩ<š&&ȧ>0.05)
+{double Ʉ=Math.Min((double)ÿ,ȧ*Ş);ȸ=Ǣ/ȧ*Ʉ;}Vector3D Ȥ=Ŋ.GetShipVelocities().LinearVelocity;Vector3D ȹ=ȸ-Ȥ;if(ȹ.Length()<Ų
+)ȹ=Vector3D.Zero;Ƚ(ȹ*Ǉ*ş-ǣ*Ǉ);return ȧ<=Ƀ&&ǩ<Š&&Ȥ.Length()<Ţ;}void Ǫ(Vector3D ȝ){ȣ(false);Vector3D Ǣ=ȝ-Ŋ.GetPosition();
+double ȧ=Ǣ.Length();Vector3D ǣ=Ŋ.GetNaturalGravity();double Ǉ=Ŋ.CalculateShipMass().PhysicalMass;Vector3D ȸ=Vector3D.Zero;if(ȧ
+>0.05){double Ʉ=Math.Min((double)ÿ,ȧ*Ş);ȸ=Ǣ/ȧ*Ʉ;}Vector3D Ȥ=Ŋ.GetShipVelocities().LinearVelocity;Vector3D ȹ=ȸ-Ȥ;if(ȹ.
+Length()<Ų)ȹ=Vector3D.Zero;Ƚ(ȹ*Ǉ*ş-ǣ*Ǉ);}double Ǩ(Vector3D Ʌ,Vector3D Ɇ)=>Ǩ(Ʌ,Ɇ,ɇ(),false);double Ǩ(Vector3D Ʌ,Vector3D Ɇ,bool
+Ɉ)=>Ǩ(Ʌ,Ɇ,ɇ(),Ɉ);double Ǩ(Vector3D Ʌ,Vector3D Ɇ,double ɉ,bool Ɉ){Vector3D ɀ=Ŋ.WorldMatrix.Forward,ǧ=Ŋ.WorldMatrix.Up;
+Vector3D Ɋ=ɀ.Cross(Ʌ);if(ɀ.Dot(Ʌ)<0.0){double ɋ=Ɋ.Length();Ɋ=ɋ>1e-6?Ɋ/ɋ:Vector3D.Normalize(ǧ);}Vector3D Ɍ=ǧ.Cross(Ɇ);if(ǧ.Dot(Ɇ)
+<0.0){double ɋ=Ɍ.Length();Ɍ=ɋ>1e-6?Ɍ/ɋ:Vector3D.Normalize(ɀ);}Vector3D ɍ=Ɋ+Ɍ;double Ɏ=Ɋ.Length()+Ɍ.Length();Ġ=Ɏ;Vector3D
+ɏ=Ŋ.GetShipVelocities().AngularVelocity;if(Ɉ){bool ɐ=ò?Ɏ<ů:(Ɏ<Ů&&ɏ.Length()<ŭ*2.0);if(ɐ){ò=true;ɑ();return Ɏ;}ò=false;}
+else{ò=false;if(Ɏ<Ŭ&&ɏ.Length()<ŭ){ɑ();return Ɏ;}}if(ɍ.Length()<ū)ɍ=Vector3D.Zero;Vector3D ɒ=ɍ*ď-ɏ*Đ;double ư=ɒ.Length();if(
+ư>ɉ&&ư>1e-6)ɒ*=ɉ/ư;foreach(var ɓ in Ŗ){if(ɓ==null||!ɓ.IsWorking)continue;Vector3D ɔ=Vector3D.TransformNormal(ɒ,MatrixD.
+Transpose(ɓ.WorldMatrix));ɓ.GyroOverride=true;ɓ.Pitch=(float)(-ɔ.X);ɓ.Yaw=(float)(-ɔ.Y);ɓ.Roll=(float)(-ɔ.Z);}return Ɏ;}void ɑ(){
+foreach(var ɓ in Ŗ)if(ɓ!=null&&ɓ.IsWorking){ɓ.GyroOverride=true;ɓ.Pitch=0f;ɓ.Yaw=0f;ɓ.Roll=0f;}}double ɇ(){double ɕ=Ā>0?Ā:(Me.
+CubeGrid.GridSizeEnum==MyCubeSize.Small?15.0:5.0);return ɕ*2.0*Math.PI/60.0;}void Ƚ(Vector3D ɖ){if(Ŋ==null)return;if(!ɗ(ɖ)){Ȼ();
+return;}double[]ȑ;MatrixD Ȓ;ȓ(out ȑ,out Ȓ);Vector3D ɘ=Vector3D.TransformNormal(ɖ,Ȓ);double[]ə=new double[6];ə[0]=Math.Max(0,ɘ.
+X);ə[1]=Math.Max(0,-ɘ.X);ə[2]=Math.Max(0,ɘ.Y);ə[3]=Math.Max(0,-ɘ.Y);ə[4]=Math.Max(0,ɘ.Z);ə[5]=Math.Max(0,-ɘ.Z);foreach(
+var Ʋ in ŗ){if(Ʋ==null||!Ʋ.IsWorking)continue;int ɛ=ɚ(Ʋ,Ȓ);if(ȑ[ɛ]<=1e-3||ə[ɛ]<=1e-3){Ʋ.ThrustOverride=0f;continue;}double
+ɜ=ə[ɛ]*(Ʋ.MaxEffectiveThrust/ȑ[ɛ]);Ʋ.ThrustOverride=(float)Math.Min(ɜ,Ʋ.MaxEffectiveThrust);}}static bool ɗ(Vector3D ɝ){
+return!double.IsNaN(ɝ.X)&&!double.IsNaN(ɝ.Y)&&!double.IsNaN(ɝ.Z)&&!double.IsInfinity(ɝ.X)&&!double.IsInfinity(ɝ.Y)&&!double.
+IsInfinity(ɝ.Z);}void ȓ(out double[]ȑ,out MatrixD Ȓ){Ȓ=MatrixD.Transpose(Ŋ.WorldMatrix);ȑ=new double[6];foreach(var Ʋ in ŗ)if(Ʋ!=
+null&&Ʋ.IsWorking)ȑ[ɚ(Ʋ,Ȓ)]+=Ʋ.MaxEffectiveThrust;}int ɚ(IMyThrust Ʋ,MatrixD Ȓ){Vector3D ɞ=Vector3D.TransformNormal(Ʋ.
+WorldMatrix.Backward,Ȓ);double ɟ=Math.Abs(ɞ.X),ɠ=Math.Abs(ɞ.Y),ɡ=Math.Abs(ɞ.Z);if(ɟ>=ɠ&&ɟ>=ɡ)return ɞ.X>=0?0:1;if(ɠ>=ɡ)return ɞ.Y>=
+0?2:3;return ɞ.Z>=0?4:5;}bool Ǥ(){if(à=="level")return true;if(à=="nose")return false;double[]ȑ;MatrixD Ȓ;ȓ(out ȑ,out Ȓ);
+double ǧ=ȑ[2],ɀ=ȑ[5];if(!ñ&&ǧ>ɀ*1.1)ñ=true;else if(ñ&&ǧ<ɀ*0.9)ñ=false;return ñ;}void ƌ(){foreach(var Ʋ in ŗ)if(Ʋ!=null)Ʋ.
+ThrustOverride=0f;foreach(var ɓ in Ŗ)if(ɓ!=null){ɓ.GyroOverride=false;ɓ.Pitch=0f;ɓ.Yaw=0f;ɓ.Roll=0f;}foreach(var ɢ in Ś)if(ɢ!=null)ɢ.
 EnableRaycast=false;Ë=0;Ì=0;ȣ(true);}void Ȼ(){foreach(var Ʋ in ŗ)if(Ʋ!=null)Ʋ.ThrustOverride=0f;}bool Ƌ=false;void ȣ(bool ɣ){if(Ŋ==
 null)return;if(ɣ){if(!Ƌ)return;Ŋ.DampenersOverride=true;Ƌ=false;}else{Ŋ.DampenersOverride=false;Ƌ=true;}}void ɂ(){bool ɤ=y.g
 ;ɥ();if(ɤ){Ɩ(f.d);Ĕ=0;}else{if(Ö==E.C){î=false;Ɩ(f.S);æ="Trip complete";}else if(Ö==E.D){î=false;Ɩ(f.S);æ=

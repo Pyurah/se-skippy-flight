@@ -36,6 +36,16 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.15.2] - 2026-08-16
+
+### Fixed
+- **Ship would never dock if its connector was powered off.** The taxi commit waits for the
+  connector to reach `Connectable`/`Connected`, but a disabled connector's magnet is dead and
+  can never reach those states — so the ship seated on the pad and waited forever, never docking
+  and never completing the leg (the "arrived at destination but the trip doesn't stop" symptom).
+  `TickTaxi` now enables its target connector before attempting the latch, for both the home and
+  destination ends.
+
 ## [0.15.1] - 2026-08-16
 
 ### Changed

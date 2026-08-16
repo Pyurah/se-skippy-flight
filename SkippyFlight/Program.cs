@@ -90,7 +90,7 @@ namespace IngameScript
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.15.1";
+const string VERSION = "0.15.2";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
@@ -1940,6 +1940,11 @@ void TickTaxi()
     bool toDest = leg.Outbound;
     var c = GetConnector(toDest ? destConn : homeConn);
     DockPose p = toDest ? DestP() : homePose;
+
+    // A powered-off connector can never reach Connectable/Connected - the magnet is dead -
+    // so the taxi would seat perfectly and then wait forever, never docking or completing
+    // the leg. Ensure our own connector is on before we commit to the latch.
+    if (c != null && !c.Enabled) c.Enabled = true;
 
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
     {
