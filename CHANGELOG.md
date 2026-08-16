@@ -36,6 +36,19 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.15.3] - 2026-08-16
+
+### Fixed
+- **Residual taxi jitter during the final docking descent.** The velocity-hold deadband
+  (added in 0.14.1 to stop 60 Hz thruster sign-flip while seated in gravity) was firing
+  unconditionally — including *during* the moving approach. Because the approach speed target
+  ramps down with distance (`speedCap = dist * APPROACH_KP`), the ship would coast until its
+  velocity error built past the band, then brake — a visible coast/brake pulse. The deadband is
+  now gated on the hold regime (`desiredVel` ~0): while still closing on the dock the controller
+  tracks the ramping speed target every frame (smooth), and only nulls sub-threshold error once
+  seated, where the anti-chatter guard is actually needed. Applied to both `FlyToPose` and
+  `StationKeep`.
+
 ## [0.15.2] - 2026-08-16
 
 ### Fixed

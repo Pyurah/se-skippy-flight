@@ -90,7 +90,7 @@ namespace IngameScript
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.15.2";
+const string VERSION = "0.15.3";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
@@ -2025,14 +2025,16 @@ bool FlyToPose(Vector3D pos, Vector3D fwd, Vector3D up, double arriveDist)
 
     Vector3D vel = rc.GetShipVelocities().LinearVelocity;
     Vector3D dv = desiredVel - vel;
-    // Don't chase sub-threshold velocity error - the same anti-chatter deadband the cruise
-    // coast uses (see RunCruiseControl, which calls this "the identical law to FlyToPose").
-    // Near the dock desiredVel -> 0, so dv is just residual velocity noise; in gravity a
-    // sub-VEL_DEADBAND error flips the *net* thrust sign every 60 Hz frame (up-bank vs
-    // down-bank), which is the landing jitter. Zero the correction below the band and let the
-    // -grav*mass hover term hold station; position still self-corrects because desiredVel
-    // grows with distance, so any real drift pushes dv back past the band and thrust resumes.
-    if (dv.Length() < VEL_DEADBAND) dv = Vector3D.Zero;
+    // Anti-chatter deadband, but ONLY in the hold regime (desiredVel ~0, i.e. seated at the
+    // dock). There dv is just residual velocity noise; in gravity a sub-VEL_DEADBAND error
+    // flips the *net* thrust sign every 60 Hz frame (up-bank vs down-bank) = landing jitter,
+    // so we zero it and let the -grav*mass hover term hold station. But during the moving
+    // approach desiredVel ramps DOWN with distance (speedCap = dist*APPROACH_KP); zeroing a
+    // small dv there makes the ship coast until error builds past the band, then brake - a
+    // visible coast/brake pulse. So while desiredVel is meaningful, always apply dv and track
+    // the ramp smoothly. Position still self-corrects at the seat: real drift regrows dv past
+    // the band and thrust resumes.
+    if (desiredVel.Length() < VEL_DEADBAND && dv.Length() < VEL_DEADBAND) dv = Vector3D.Zero;
     ApplyForce(dv * mass * VEL_GAIN - grav * mass);
 
     return dist <= arriveDist && align < ALIGN_TOL && vel.Length() < ARRIVE_SPEED;
@@ -2060,9 +2062,11 @@ void StationKeep(Vector3D pos)
 
     Vector3D vel = rc.GetShipVelocities().LinearVelocity;
     Vector3D dv = desiredVel - vel;
-    // Same sub-threshold velocity deadband as FlyToPose/cruise: hold the staging/holding fix
-    // on the hover term without pulsing thrusters to null residual drift (gravity jitter).
-    if (dv.Length() < VEL_DEADBAND) dv = Vector3D.Zero;
+    // Same hold-gated deadband as FlyToPose: only null sub-threshold dv once we're seated on
+    // the fix (desiredVel ~0), so the hover term holds station without gravity jitter. While
+    // still closing on the fix, desiredVel is meaningful and ramping down - apply dv every
+    // frame so we track it smoothly instead of coast/brake pulsing.
+    if (desiredVel.Length() < VEL_DEADBAND && dv.Length() < VEL_DEADBAND) dv = Vector3D.Zero;
     ApplyForce(dv * mass * VEL_GAIN - grav * mass);
 }
 
