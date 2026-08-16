@@ -20,8 +20,10 @@
  * See README.md for the full key table and semantics.
  *
  * SCREEN VIEWS: each ship screen shows ONE view so a multi-screen cockpit can split
- * the display - full (header+menu, the default), menu, status, trip. Assign via a
- * tagged LCD name ([SF] = full, [SF:trip], [SF:menu:1.2] to pin the
+ * the display - full (header+menu, the default), menu, status, trip, telem. telem is
+ * the in-flight instrument/diagnostic readout (speed vs cap, the speed-derate factors,
+ * vertical rate, gravity, altitude, waypoint progress, attitude error, fuel). Assign via a
+ * tagged LCD name ([SF] = full, [SF:trip], [SF:telem], [SF:menu:1.2] to pin the
  * font, [SF:status:1.4:6] to also pin 6% padding) or an [sf-screens] section
  * in a cockpit/PB's own Custom Data mapping surface index -> view (e.g.
  * "2 = status@1.4/6" = view@font/pad). Each screen sizes to its OWN content, so a
@@ -64,7 +66,7 @@
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.12.0";
+const string VERSION = "0.14.0";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
@@ -379,6 +381,8 @@ double cruiseAccel = 1.0;                       // [m/s^2] decel/lateral accel c
 double cruiseProgTimer = 0;                     // seconds since the ship last closed on its target waypoint (stuck watchdog)
 double cruiseBestDist = double.MaxValue;        // closest approach so far to the current waypoint; getting nearer resets the watchdog. A simplified straight is one waypoint tens of km away, so timing waypoint *arrivals* false-faults on a leg the ship is flying perfectly (v0.13.2)
 bool cruiseFlyLevel = false;                    // latched decision (with hysteresis) for auto cruiseAttitude: true = fly belly-down/VTOL, false = nose-to-path. See UseLevelFlight
+double dbgAlign = 1, dbgVel = 1, dbgVbrake = 0, dbgCap = 0;   // last-tick cruise speed-derate factors (heading, velocity-align, braking-curve speed, governor cap), surfaced on the TELEM screen to show why achieved speed < cruiseSpeed
+double lastAlignErr = 0;                         // last attitude error from AlignTo (rad-ish); surfaced on the TELEM screen for align-stall diagnosis
 bool gyroResting = false;                        // latch: gyros held inert on-heading during coast-hold (see AlignTo). Wakes only on real heading drift, not angular-velocity noise from thruster torque - stops the gyros fighting the translation controller at cruise
 double dockBlockTimer = 0;                        // s the docking corridor has read continuously blocked (see TickHolding/TickTaxi); drives the optional dockBlockSec give-up and the status readout
 double dockClearFor = 0;                          // s the corridor has read clear since a block; must exceed CLEAR_CONFIRM_SEC before a held approach resumes, so we don't lurch forward at a ship still crossing
@@ -419,7 +423,7 @@ double zoneWait;                                   // s spent loitering post-LAN
 // looks exactly as before. A screen picks its view by name tag ([SF:trip])
 // or, for a multi-surface block like a cockpit, a [sf-screens] section in
 // that block's Custom Data (see ParseScreenTag / Discover).
-const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip";
+const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 
 // ---- LCD menu (ship role) --------------------------------------------------
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
@@ -471,6 +475,7 @@ const double MIN_ACCEL = 0.5;             // m/s^2, floors the profile accel so 
 const double CORNER_STRAIGHT_TOL = 0.10;  // rad (~6 deg): below this deflection, no corner speed limit
 const double ALIGN_SLOW_TOL = 0.5;        // attitude error at which the forward-speed factor hits its floor
 const double ALIGN_MIN_FAC = 0.15;        // never fully stall forward speed while re-aiming (keeps creeping to re-align)
+const double ALIGN_DEADZONE = 0.12;       // sin(~6.9 deg): heading miss below this is gyro/thrust-torque jitter, not a turn -> no speed derate (velFac still guards true sideways drift)
 const double VEL_MIN_FAC = 0.30;          // floor on the sideways-velocity speed cut
 const double CRUISE_STUCK_TIMEOUT = 60.0; // s without closing on the target waypoint -> Faulted
 const double ALIGN_DEADBAND = 0.01;       // ~0.6 deg: below this the gyros rest instead of hunting the target
@@ -1728,11 +1733,15 @@ bool RunCruiseControl()
     // the *nose target* (Forward x fwdTarget), not the raw path: being rolled off level, or
     // (in level flight) deliberately not pointing up a steep climb, doesn't affect the
     // thrust that actually moves the ship, so it must not cut cruise speed. Throttling on
-    // the vertical miss is exactly the old ~30 m/s trap.
+    // the vertical miss is exactly the old ~30 m/s trap. A deadzone ignores the small
+    // residual (~<7 deg) the gyros always carry while thrust-torque loads the frame under
+    // power -- that jitter is not a turn, and derating on it capped cruise ~10% below the
+    // governor (observed 183 vs 200). velFac still guards genuine sideways drift on its own.
     double headErr = rc.WorldMatrix.Forward.Cross(fwdTarget).Length();
-    double alignFac = Clamp(1.0 - headErr / ALIGN_SLOW_TOL, ALIGN_MIN_FAC, 1.0);
+    double alignFac = Clamp(1.0 - Math.Max(0.0, headErr - ALIGN_DEADZONE) / ALIGN_SLOW_TOL, ALIGN_MIN_FAC, 1.0);
     double vmag = vel.Length();
     double velFac = vmag < 1.0 ? 1.0 : Clamp((vel / vmag).Dot(pathDir), VEL_MIN_FAC, 1.0);
+    dbgAlign = alignFac; dbgVel = velFac; dbgVbrake = vBrake; dbgCap = CruiseCap();   // surfaced on TELEM
     speed *= alignFac * velFac;
 
     Vector3D desiredVel = pathDir * speed;
@@ -2031,6 +2040,7 @@ double AlignTo(Vector3D targetFwd, Vector3D targetUp, double maxRad, bool coastH
     }
     Vector3D err = fErr + uErr;   // combined world-space rotation axis * angle
     double attErr = fErr.Length() + uErr.Length();
+    lastAlignErr = attErr;        // latch for the TELEM view (attitude-stall diagnosis)
 
     Vector3D angVel = rc.GetShipVelocities().AngularVelocity;   // world rad/s
 
@@ -2468,6 +2478,7 @@ string NormalizeView(string v)
         case VIEW_MENU:   return VIEW_MENU;
         case VIEW_STATUS: return VIEW_STATUS;
         case VIEW_TRIP:   return VIEW_TRIP;
+        case VIEW_TELEM:  return VIEW_TELEM;
         default:          return VIEW_FULL;
     }
 }
@@ -3116,8 +3127,38 @@ string BuildView(string view)
         case VIEW_MENU:   return BuildMenu();
         case VIEW_STATUS: return BuildStatus();
         case VIEW_TRIP:   return BuildTrip();
+        case VIEW_TELEM:  return BuildTelem();
         default:          return BuildHeader() + BuildMenu();   // full
     }
+}
+
+// TELEM screen: in-flight instrument readout. Beyond raw speed it exposes the cruise
+// controller's own numbers so a "why won't it reach cruiseSpeed?" question is answerable
+// in-world. The controller commands speed = min(cap, brakingCurve) * alignFac * velFac
+// (RunCruiseControl); the Drt line shows all four so a shortfall reads as a heading miss
+// (a<1), a velocity-vector miss (v<1), or the braking curve pulling toward a near waypoint
+// (br<c). Kept dense on purpose - the ship script rides the 100k paste limit. Values are
+// last-tick; Grav is folded onto the VS line and the redundant m/s2 term dropped to fit.
+string BuildTelem()
+{
+    var sb = new StringBuilder("-- Telem --\n");
+    if (rc == null) return sb.Append("no rc").ToString();
+    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
+    Vector3D grav = rc.GetNaturalGravity();
+    double gMag = grav.Length();
+    sb.Append(ShipState() + (operating ? " [RUN]" : " [STOP]") + " t" + phaseTimer.ToString("0") + "s\n");
+    sb.Append("Spd " + rc.GetShipSpeed().ToString("0.0"));
+    if (cruiseArmed && cruiseIdx < legVmax.Count) sb.Append("/" + Math.Min(CruiseCap(), legVmax[cruiseIdx]).ToString("0") + "cap");
+    sb.Append("\nDrt a" + dbgAlign.ToString("0.00") + " v" + dbgVel.ToString("0.00") + " br" + dbgVbrake.ToString("0") + " c" + dbgCap.ToString("0") + "\n");
+    if (gMag > 1e-3) sb.Append("VS " + vel.Dot(-grav / gMag).ToString("+0.0;-0.0") + " Grav " + (gMag / 9.81).ToString("0.00") + "g\n");
+    else sb.Append("VS (space)\n");
+    double surf;
+    if (rc.TryGetPlanetElevation(MyPlanetElevation.Surface, out surf)) sb.Append("Alt " + surf.ToString("0") + "m\n");
+    if (cruiseArmed && legWps.Count > 0) sb.Append("WP " + (cruiseIdx + 1) + "/" + legWps.Count + " " + (RemainingDistance() / 1000.0).ToString("0.0") + "km\n");
+    sb.Append("Att " + (lastAlignErr * 57.2958).ToString("0.0") + "deg\n");
+    double h2 = HydrogenPct(), batt = BatteryPct();
+    sb.Append("H2 " + (h2 < 0 ? "n/a" : h2.ToString("0") + "%") + " Bat " + (batt < 0 ? "n/a" : batt.ToString("0") + "%"));
+    return sb.ToString();
 }
 
 // Compact one-line header: ship + short state + run flag.

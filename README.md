@@ -207,7 +207,7 @@ interactive menu. If that's too crowded (e.g. a cockpit with several screens), y
 each screen a *different* view. Each screen also **sizes its font to its own content**, so a
 small screen no longer shrinks a big wall LCD.
 
-Four views:
+Five views:
 
 | View | Shows |
 |---|---|
@@ -215,11 +215,12 @@ Four views:
 | `menu` | Just the interactive menu — the screen you drive from (no status header; pair it with a `status` screen) |
 | `status` | Compact block: `-- Status --` / `<State> [RUN\|STOP]` / *(blank)* / `-- Cargo --` / `<fill>%  <mass>t  <speed>m/s` |
 | `trip` | Route, current phase, ETA + distance while cruising, and the transient status line (delivered / holding at destination / holding at home / fuel-hold) |
+| `telem` | In-flight **instrument + diagnostic** readout: phase/run/time, speed vs the active cap, a **speed-derate line** (`Drt a<align> v<vel> br<brake> c<cap>`), vertical rate, gravity, surface altitude, waypoint progress + remaining distance, attitude error, and fuel. The `Drt` line answers *"why won't it reach `cruiseSpeed`?"* — the controller flies `speed = min(cap, brake) × align × vel`, so a steady shortfall shows as `a<1` (nose off the path), `v<1` (velocity vector off the path), or `br<c` (braking curve pulling toward a near waypoint). |
 
 Assign a view two ways:
 
 - **Standalone LCD — name tag.** Append `:view` to the base tag in the panel's name:
-  `[SF:trip]`, `[SF:menu]`, `[SF:status]`. A bare `[SF]` stays `full`.
+  `[SF:trip]`, `[SF:telem]`, `[SF:menu]`, `[SF:status]`. A bare `[SF]` stays `full`.
 - **Cockpit / multi-surface block — Custom Data.** Add an opt-in `[sf-screens]` section
   to the block's Custom Data mapping each surface index to a view:
 

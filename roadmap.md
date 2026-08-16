@@ -7,7 +7,9 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** ship 0.12.0 / tower 0.13.0 (Slice i delivered — **tower-relayed pad paths + holding
+- **Version:** ship 0.14.0 / tower 0.13.0 (ship 0.14.0 — **TELEM instrument screen restored** with a
+  new speed-derate breakdown line, which surfaced and fixed a cruise **heading-align derate** that
+  capped straight-leg speed ~10% below `cruiseSpeed`; see the note after the Slice i summary. Slice i delivered — **tower-relayed pad paths + holding
   zones**, and a **script split**: setup tooling moved out of SkippyFlight into a new SkippyTower **teach
   mode**, so the flight script stands alone. For a station the ship does *not* own — a hole-in-the-wall
   entrance with interior pads at varied angles — the trip splits into **ship-owned** (home → cruise →
@@ -37,6 +39,17 @@ faithful copy of that script and is refactored onto a phase-object architecture.
   Slice d's altitude-trend `Climb → Cruise → Descent` boundaries; Slice c's scenario-aware cruise;
   Slice b's `DepartStaging`/`Holding`/`Taxi` phases; and Slice a's phase-object base controller and
   multiple named routes. Block tags and Custom Data sections are keyed to `SF`.)
+- **Post-Slice i (ship 0.14.0):** restored the **TELEM screen** (`[SF:telem]`) that Slice i had cut for
+  budget, and added a **speed-derate breakdown** (`Drt a<align> v<vel> br<brake> c<cap>`) so an
+  in-flight "why is it capped below `cruiseSpeed`?" is answerable on-screen — it exposes the
+  `speed = min(cap, brake) * alignFac * velFac` factors the cruise controller uses. The screen paid off
+  immediately: it showed straight-leg cruise capping ~10% low (183 vs 200) with `v=1.00`, isolating the
+  cause to the **heading-align derate** firing on the 2–5° gyro/thrust-torque nose wobble. Added an
+  `ALIGN_DEADZONE` (~7°) so that jitter no longer cuts speed (`velFac` still guards true sideways drift;
+  real turns still slow). Corner decelerations at waypoints were investigated and left as-is — they are
+  the profiler correctly braking to `sqrt(cruiseAccel·R)` for the configured `cornerLen=30` rounding
+  (raise `cornerLen`/`simplifyMeters` in Custom Data to take gentle bends faster). `BuildTelem` was
+  rewritten dense to fit: **ship min 99,673 chars (327 headroom, braces 518/518)**.
 - **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
   build/test tooling; all validation is in-world)
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,

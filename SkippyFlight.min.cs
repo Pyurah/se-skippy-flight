@@ -1,4 +1,4 @@
-const string VERSION = "0.12.0";
+const string VERSION = "0.14.0";
 enum RunMode { Continuous, OneTrip, OneWay }
 enum DepartTrigger { Auto, Cargo, Timer, Manual }
 struct DockPose
@@ -213,6 +213,8 @@ double cruiseAccel = 1.0;
 double cruiseProgTimer = 0;
 double cruiseBestDist = double.MaxValue;
 bool cruiseFlyLevel = false;
+double dbgAlign = 1, dbgVel = 1, dbgVbrake = 0, dbgCap = 0;
+double lastAlignErr = 0;
 bool gyroResting = false;
 double dockBlockTimer = 0;
 double dockClearFor = 0;
@@ -236,7 +238,7 @@ bool interior;
 bool interiorDone;
 Vector3D loiterPos; bool haveLoiter;
 double zoneWait;
-const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip";
+const string VIEW_FULL = "full", VIEW_MENU = "menu", VIEW_STATUS = "status", VIEW_TRIP = "trip", VIEW_TELEM = "telem";
 const int PAGE_MAIN = 0, PAGE_RECORD = 1, PAGE_SETTINGS = 2, PAGE_DEPART = 3, PAGE_ROUTES = 4;
 int menuPage = PAGE_MAIN;
 int menuIndex = 0;
@@ -274,6 +276,7 @@ const double MIN_ACCEL = 0.5;
 const double CORNER_STRAIGHT_TOL = 0.10;
 const double ALIGN_SLOW_TOL = 0.5;
 const double ALIGN_MIN_FAC = 0.15;
+const double ALIGN_DEADZONE = 0.12;
 const double VEL_MIN_FAC = 0.30;
 const double CRUISE_STUCK_TIMEOUT = 60.0;
 const double ALIGN_DEADBAND = 0.01;
@@ -1142,9 +1145,10 @@ bool RunCruiseControl()
     else { fwdTarget = pathDir; upTarget = rc.WorldMatrix.Up; }
     double align = AlignTo(fwdTarget, upTarget, true);
     double headErr = rc.WorldMatrix.Forward.Cross(fwdTarget).Length();
-    double alignFac = Clamp(1.0 - headErr / ALIGN_SLOW_TOL, ALIGN_MIN_FAC, 1.0);
+    double alignFac = Clamp(1.0 - Math.Max(0.0, headErr - ALIGN_DEADZONE) / ALIGN_SLOW_TOL, ALIGN_MIN_FAC, 1.0);
     double vmag = vel.Length();
     double velFac = vmag < 1.0 ? 1.0 : Clamp((vel / vmag).Dot(pathDir), VEL_MIN_FAC, 1.0);
+    dbgAlign = alignFac; dbgVel = velFac; dbgVbrake = vBrake; dbgCap = CruiseCap();
     speed *= alignFac * velFac;
     Vector3D desiredVel = pathDir * speed;
     Vector3D dv = desiredVel - vel;
@@ -1328,6 +1332,7 @@ double AlignTo(Vector3D targetFwd, Vector3D targetUp, double maxRad, bool coastH
     }
     Vector3D err = fErr + uErr;
     double attErr = fErr.Length() + uErr.Length();
+    lastAlignErr = attErr;
     Vector3D angVel = rc.GetShipVelocities().AngularVelocity;
     if (coastHold)
     {
@@ -1607,6 +1612,7 @@ string NormalizeView(string v)
         case VIEW_MENU:   return VIEW_MENU;
         case VIEW_STATUS: return VIEW_STATUS;
         case VIEW_TRIP:   return VIEW_TRIP;
+        case VIEW_TELEM:  return VIEW_TELEM;
         default:          return VIEW_FULL;
     }
 }
@@ -2103,8 +2109,30 @@ string BuildView(string view)
         case VIEW_MENU:   return BuildMenu();
         case VIEW_STATUS: return BuildStatus();
         case VIEW_TRIP:   return BuildTrip();
+        case VIEW_TELEM:  return BuildTelem();
         default:          return BuildHeader() + BuildMenu();
     }
+}
+string BuildTelem()
+{
+    var sb = new StringBuilder("-- Telem --\n");
+    if (rc == null) return sb.Append("no rc").ToString();
+    Vector3D vel = rc.GetShipVelocities().LinearVelocity;
+    Vector3D grav = rc.GetNaturalGravity();
+    double gMag = grav.Length();
+    sb.Append(ShipState() + (operating ? " [RUN]" : " [STOP]") + " t" + phaseTimer.ToString("0") + "s\n");
+    sb.Append("Spd " + rc.GetShipSpeed().ToString("0.0"));
+    if (cruiseArmed && cruiseIdx < legVmax.Count) sb.Append("/" + Math.Min(CruiseCap(), legVmax[cruiseIdx]).ToString("0") + "cap");
+    sb.Append("\nDrt a" + dbgAlign.ToString("0.00") + " v" + dbgVel.ToString("0.00") + " br" + dbgVbrake.ToString("0") + " c" + dbgCap.ToString("0") + "\n");
+    if (gMag > 1e-3) sb.Append("VS " + vel.Dot(-grav / gMag).ToString("+0.0;-0.0") + " Grav " + (gMag / 9.81).ToString("0.00") + "g\n");
+    else sb.Append("VS (space)\n");
+    double surf;
+    if (rc.TryGetPlanetElevation(MyPlanetElevation.Surface, out surf)) sb.Append("Alt " + surf.ToString("0") + "m\n");
+    if (cruiseArmed && legWps.Count > 0) sb.Append("WP " + (cruiseIdx + 1) + "/" + legWps.Count + " " + (RemainingDistance() / 1000.0).ToString("0.0") + "km\n");
+    sb.Append("Att " + (lastAlignErr * 57.2958).ToString("0.0") + "deg\n");
+    double h2 = HydrogenPct(), batt = BatteryPct();
+    sb.Append("H2 " + (h2 < 0 ? "n/a" : h2.ToString("0") + "%") + " Bat " + (batt < 0 ? "n/a" : batt.ToString("0") + "%"));
+    return sb.ToString();
 }
 string BuildHeaderLine()
 {

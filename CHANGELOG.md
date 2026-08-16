@@ -4,6 +4,44 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] - 2026-08-16
+
+Ship-only. Restores the **TELEM instrument screen** (removed in Slice i for char budget) and, on it,
+adds a **speed-derate breakdown** so a "why won't it reach `cruiseSpeed`?" question is answerable
+in-world without a code dive. The cruise controller commands
+`speed = min(cap, brakingCurve) * alignFac * velFac`; the new `Drt` line surfaces all four numbers, so a
+steady shortfall reads directly as a heading miss (`a<1`), a velocity-vector miss (`v<1`), or the
+braking curve pulling toward a near waypoint (`br<c`). `BuildTelem` was rewritten dense (single-`Append`
+lines, gravity folded onto the vertical-speed line) to fit under the 100k ship paste limit.
+
+The screen immediately paid for itself: it showed cruise capping ~10% below the governor (183 vs a
+`cruiseSpeed` of 200) on straight legs with `v=1.00` (velocity dead on-path) — the shortfall was the
+**heading-align derate** firing on the 2–5° nose wobble the gyros always carry while thrust-torque
+loads the frame under power. That derate now has a **deadzone** (see Fixed). Ship min is 99,673 chars
+(327 headroom, braces balanced).
+
+### Added
+- **TELEM screen (`[SF:telem]` / `telem` in `[sf-screens]`)** — in-flight instrument readout: phase +
+  run flag + time-in-phase, speed vs the active cap, the new speed-derate line, vertical rate, gravity,
+  surface altitude, waypoint progress + remaining distance, attitude error, and fuel reserves.
+- **Speed-derate telemetry (`Drt a<align> v<vel> br<brake> c<cap>`)** — the cruise controller's
+  per-tick derate factors, latched for the TELEM view. `alignFac`/`velFac` from `RunCruiseControl`,
+  the braking-curve speed, and the active governor cap. Restores `lastAlignErr` (attitude error, shown
+  as `Att … deg`), also removed in Slice i.
+
+### Changed
+- `BuildTelem` reimplemented compactly (labels shortened, `Append` chains collapsed, the standalone
+  gravity `m/s²` term dropped — `g` is retained on the VS line) to restore the screen within budget.
+
+### Fixed
+- **Cruise capped ~10% below `cruiseSpeed` on straight legs** (observed 183 vs 200, in atmosphere and
+  in open space alike). The heading-align speed factor (`alignFac`, `RunCruiseControl`) derated on the
+  small residual attitude error (~2–5°) the gyros always carry while thrust-torque loads the frame —
+  jitter, not a turn. Added an `ALIGN_DEADZONE` (~7°): heading misses below it no longer cut speed, so
+  the ship reaches its governor on straights. `velFac` still fully guards genuine sideways drift
+  (it read a perfect 1.00 throughout, confirming the derate was the sole cause), and real turns beyond
+  the deadzone still slow exactly as before.
+
 ## [0.13.0] - 2026-08-15
 
 Slice i — **tower-relayed pad paths + holding zones**, and a script split so the flight half stands
