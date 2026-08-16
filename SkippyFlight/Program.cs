@@ -1,3 +1,27 @@
+using Sandbox.Game.EntityComponents;
+using Sandbox.ModAPI.Ingame;
+using Sandbox.ModAPI.Interfaces;
+using SpaceEngineers.Game.ModAPI.Ingame;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Linq;
+using System.Text;
+using VRage;
+using VRage.Collections;
+using VRage.Game;
+using VRage.Game.Components;
+using VRage.Game.GUI.TextPanel;
+using VRage.Game.ModAPI.Ingame;
+using VRage.Game.ModAPI.Ingame.Utilities;
+using VRage.Game.ObjectBuilders.Definitions;
+using VRageMath;
+
+namespace IngameScript
+{
+    public partial class Program : MyGridProgram
+    {
 /*//////////////////////////////////////////////////////////////////////////////
  * SkippyFlight - Autonomous two-connector delivery shuttle for Space Engineers.
  * For pure ferry duty: cargo between two docks (e.g. a planet
@@ -66,7 +90,7 @@
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.14.0";
+const string VERSION = "0.15.0";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
@@ -563,7 +587,9 @@ void Save()
     // Persist enough to resume a cycle across a recompile.
     var ini = new MyIni();
     ini.TryParse(Me.CustomData);
-    ini.Set("state", "phase", phase.ToString());
+    // Persist the phase as its integer value, NOT phase.ToString(): the minifier renames
+    // enum members, so a name would be an unstable letter that can't survive a rebuild.
+    ini.Set("state", "phase", (int)phase);
     ini.Set("state", "outbound", leg.Outbound);
     ini.Set("state", "operating", operating);
     ini.Set("state", "phaseTimer", phaseTimer);
@@ -756,7 +782,7 @@ void HandleCommand(string arg)
                 phaseTimer = 0;          // begin a fresh load/unload dwell
                 departRequested = false; // drop any stale manual-depart latch
             }
-            statusMsg = "Started (" + runMode + ")";
+            statusMsg = "Started (" + ModeName(runMode) + ")";
             break;
 
         case "STOP":
@@ -790,7 +816,7 @@ void HandleCommand(string arg)
 
         case "MODE":
             if (parts.Length > 1) SetMode(parts[1]);
-            else statusMsg = "Mode: " + runMode;
+            else statusMsg = "Mode: " + ModeName(runMode);
             break;
 
         case "DEPART":
@@ -862,7 +888,25 @@ void SetMode(string m)
     var ini = new MyIni(); ini.TryParse(Me.CustomData);
     ini.Set("sf", "runMode", m);
     Me.CustomData = ini.ToString();
-    statusMsg = "Mode = " + runMode;
+    statusMsg = "Mode = " + ModeName(runMode);
+}
+
+// Human-readable enum names via string LITERALS. The minifier renames enum members
+// (RunMode.Continuous -> a letter), so enum.ToString()/concatenation would emit that
+// letter on screen (the "Mode: A/B/C" bug) and, worse, write it into Custom Data where
+// it can't round-trip back through the literal parsers. Literals survive minification,
+// so route every name-producing site through these.
+string ModeName(RunMode m)
+{
+    return m == RunMode.OneTrip ? "OneTrip"
+         : m == RunMode.OneWay ? "OneWay" : "Continuous";
+}
+
+string TrigName(DepartTrigger t)
+{
+    return t == DepartTrigger.Cargo ? "Cargo"
+         : t == DepartTrigger.Timer ? "Timer"
+         : t == DepartTrigger.Manual ? "Manual" : "Auto";
 }
 
 // ============================================================================
@@ -1975,8 +2019,16 @@ bool FlyToPose(Vector3D pos, Vector3D fwd, Vector3D up, double arriveDist)
     }
 
     Vector3D vel = rc.GetShipVelocities().LinearVelocity;
-    Vector3D force = (desiredVel - vel) * mass * VEL_GAIN - grav * mass;
-    ApplyForce(force);
+    Vector3D dv = desiredVel - vel;
+    // Don't chase sub-threshold velocity error - the same anti-chatter deadband the cruise
+    // coast uses (see RunCruiseControl, which calls this "the identical law to FlyToPose").
+    // Near the dock desiredVel -> 0, so dv is just residual velocity noise; in gravity a
+    // sub-VEL_DEADBAND error flips the *net* thrust sign every 60 Hz frame (up-bank vs
+    // down-bank), which is the landing jitter. Zero the correction below the band and let the
+    // -grav*mass hover term hold station; position still self-corrects because desiredVel
+    // grows with distance, so any real drift pushes dv back past the band and thrust resumes.
+    if (dv.Length() < VEL_DEADBAND) dv = Vector3D.Zero;
+    ApplyForce(dv * mass * VEL_GAIN - grav * mass);
 
     return dist <= arriveDist && align < ALIGN_TOL && vel.Length() < ARRIVE_SPEED;
 }
@@ -2002,8 +2054,11 @@ void StationKeep(Vector3D pos)
     }
 
     Vector3D vel = rc.GetShipVelocities().LinearVelocity;
-    Vector3D force = (desiredVel - vel) * mass * VEL_GAIN - grav * mass;
-    ApplyForce(force);
+    Vector3D dv = desiredVel - vel;
+    // Same sub-threshold velocity deadband as FlyToPose/cruise: hold the staging/holding fix
+    // on the hover term without pulsing thrusters to null residual drift (gravity jitter).
+    if (dv.Length() < VEL_DEADBAND) dv = Vector3D.Zero;
+    ApplyForce(dv * mass * VEL_GAIN - grav * mass);
 }
 
 // PD cross-product attitude controller. The P term rotates toward the target
@@ -2963,7 +3018,7 @@ void CycleMode()
     string s = runMode == RunMode.OneTrip ? "ONETRIP"
              : runMode == RunMode.OneWay ? "ONEWAY" : "CONTINUOUS";
     SaveCfg("runMode", s);
-    statusMsg = "Mode = " + runMode;
+    statusMsg = "Mode = " + ModeName(runMode);
 }
 
 // Cycle a per-connector departure trigger (APPLY on the Depart page), persisting it.
@@ -2975,8 +3030,8 @@ void CycleTrigger(bool home)
       : t == DepartTrigger.Timer ? DepartTrigger.Manual
       : DepartTrigger.Auto;
     if (home) homeTrigger = t; else destTrigger = t;
-    SaveCfg(home ? "homeTrigger" : "destTrigger", t.ToString());
-    statusMsg = (home ? "Home" : "Dest") + " trigger = " + t;
+    SaveCfg(home ? "homeTrigger" : "destTrigger", TrigName(t));
+    statusMsg = (home ? "Home" : "Dest") + " trigger = " + TrigName(t);
 }
 
 void BeginEdit(double v) { editing = true; editValue = v; }
@@ -3035,7 +3090,7 @@ List<string> MenuLabels()
     if (menuPage == PAGE_MAIN)
     {
         l.Add(operating ? "Stop" : "Start");
-        l.Add("Mode: " + runMode);
+        l.Add("Mode: " + ModeName(runMode));
         l.Add("Depart Now");
         l.Add("Go Home");
         l.Add("Record >>");
@@ -3067,8 +3122,8 @@ List<string> MenuLabels()
     }
     else if (menuPage == PAGE_DEPART)
     {
-        l.Add("Home trig: " + homeTrigger);
-        l.Add("Dest trig: " + destTrigger);
+        l.Add("Home trig: " + TrigName(homeTrigger));
+        l.Add("Dest trig: " + TrigName(destTrigger));
         l.Add("Dwell: " + FmtSetting(2, dwellSec) + " s");
         l.Add("Min H2: " + FmtSetting(3, minHydrogenPct) + " %");
         l.Add("Min Bat: " + FmtSetting(4, minBatteryPct) + " %");
@@ -3161,10 +3216,12 @@ string BuildTelem()
     return sb.ToString();
 }
 
-// Compact one-line header: ship + short state + run flag.
+// Compact one-line header: ship + version + short state + run flag. Surfacing VERSION
+// here is the only in-world way to confirm which build a PB is running (it also keeps the
+// const referenced so the minifier doesn't dead-strip it).
 string BuildHeaderLine()
 {
-    return shipName + " " + ShipState() + (operating ? " [RUN]" : " [STOP]");
+    return shipName + " v" + VERSION + " " + ShipState() + (operating ? " [RUN]" : " [STOP]");
 }
 
 // The full multi-line status header (name/state, cargo, route, ETA, status line).
@@ -3358,8 +3415,8 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("sf", "channel", channel);
     ini.Set("sf", "useTower", useTower ? "auto" : "off");
     ini.Set("sf", "runMode", modeStr);
-    ini.Set("sf", "homeTrigger", homeTrigger.ToString());
-    ini.Set("sf", "destTrigger", destTrigger.ToString());
+    ini.Set("sf", "homeTrigger", TrigName(homeTrigger));
+    ini.Set("sf", "destTrigger", TrigName(destTrigger));
     ini.Set("sf", "remoteName", remoteName);
     ini.Set("sf", "loadTag", loadTag);
     ini.Set("sf", "unloadTag", unloadTag);
@@ -3757,9 +3814,11 @@ void LoadState()
     // Skippy-Shuttle, pasted over) resumes on the correct phase and direction.
     if (ini.ContainsKey("state", "phase"))
     {
-        PhaseId p;
-        if (!Enum.TryParse(ini.Get("state", "phase").ToString("Idle"), out p)) p = PhaseId.Idle;
-        phase = p;
+        // Read the integer phase written by Save(). A pre-integer value (an old minified
+        // enum-name letter) or anything out of range falls back to Idle - benign, the
+        // operator just re-issues START.
+        int pv = ini.Get("state", "phase").ToInt32(-1);
+        phase = (pv >= 0 && pv <= (int)PhaseId.Faulted) ? (PhaseId)pv : PhaseId.Idle;
         leg.Outbound = ini.Get("state", "outbound").ToBoolean(true);
     }
     else
@@ -3808,3 +3867,6 @@ bool TryVec(string s, out Vector3D v)
 int ParseInt(string s, int def) { int r; return int.TryParse(s, out r) ? r : def; }
 long ParseLong(string s) { long r; return long.TryParse(s, out r) ? r : 0; }
 double ParseDouble(string s, double def) { double r; return double.TryParse(s, out r) ? r : def; }
+
+    }
+}

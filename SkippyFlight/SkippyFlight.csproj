@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netframework48</TargetFramework>
+    <RootNamespace>IngameScript</RootNamespace>
+    <LangVersion>6</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Configurations>Release;Debug</Configurations>
+    <Platforms>x64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Mal.Mdk2.PbAnalyzers" Version="2.2.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Mal.Mdk2.PbPackager" Version="2.2.10">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Mal.Mdk2.References" Version="2.2.9">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <None Remove="Instructions.readme" />
+    <AdditionalFiles Include="Instructions.readme" />
+    <AdditionalFiles Include="thumb.png" />
+  </ItemGroup>
+
+  <!-- After MDK packs to the game's local script folder (output=auto), copy the packed
+       script back into the repo as a committed, diffable deploy artifact. The minifier
+       is deterministic, so this only changes when the source does. -->
+  <Target Name="MdkCopyToRepo" AfterTargets="MdkPack" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <MdkDeployedScript>$(AppData)\SpaceEngineers\IngameScripts\local\$(MSBuildProjectName)\script.cs</MdkDeployedScript>
+      <MdkRepoArtifact>$(MSBuildProjectDirectory)\..\$(MSBuildProjectName).min.cs</MdkRepoArtifact>
+    </PropertyGroup>
+    <Copy Condition="Exists('$(MdkDeployedScript)')" SourceFiles="$(MdkDeployedScript)" DestinationFiles="$(MdkRepoArtifact)" OverwriteReadOnlyFiles="true" SkipUnchangedFiles="false" />
+    <Message Condition="Exists('$(MdkDeployedScript)')" Importance="high" Text="MDK: copied packed script -&gt; $(MdkRepoArtifact)" />
+    <Warning Condition="!Exists('$(MdkDeployedScript)')" Text="MDK: packed script not found at $(MdkDeployedScript); repo artifact not refreshed." />
+  </Target>
+</Project>

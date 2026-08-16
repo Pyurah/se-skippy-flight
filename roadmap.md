@@ -50,8 +50,22 @@ faithful copy of that script and is refactored onto a phase-object architecture.
   the profiler correctly braking to `sqrt(cruiseAccel·R)` for the configured `cornerLen=30` rounding
   (raise `cornerLen`/`simplifyMeters` in Custom Data to take gentle bends faster). `BuildTelem` was
   rewritten dense to fit: **ship min 99,673 chars (327 headroom, braces 518/518)**.
-- **Environment:** Space Engineers in-game Programmable Block (single-file C#, no external
-  build/test tooling; all validation is in-world)
+- **Tooling — MDK2 migration (no version bump):** replaced the ad-hoc `tools/build-min.py`
+  comment-stripper with the [MDK2](https://github.com/malforge/mdk2) toolchain. Both scripts are now
+  real C# projects (`SkippyFlight/`, `SkippyTower/`, `SkippyFleet.sln`) built with `dotnet build -c
+  Release`: `Mal.Mdk2.PbAnalyzers` validates every call against the PB whitelist and Roslyn compiles the
+  code (both far stronger than the old brace-only check), then `Mal.Mdk2.PbPackager` packs with full
+  minification (whitespace stripped + identifiers renamed to Unicode short names) straight into the game's
+  local script folder and copies the result back to the committed `*.min.cs`. Verified deterministic and
+  that renaming never touches a string literal (wire tokens / Custom Data keys intact). **Char budget
+  reclaimed: ship min 99,673 → 49,208 chars (50,792 headroom); tower min 24,845 → 14,305 chars (85,695
+  headroom)** — the 100k paste limit is no longer a practical constraint. Source of truth moved to each
+  project's `Program.cs` (root flat-body `.cs` removed; content byte-identical, wrapped in `partial class
+  Program`). No functional change; ship stays 0.14.0, tower 0.13.0. In-world re-validation pending.
+- **Environment:** Space Engineers in-game Programmable Block. Source is C# built with the MDK2
+  toolchain (`dotnet build -c Release`): Roslyn + the PB-whitelist analyzer compile-check every build,
+  then the packager minifies to the committed `*.min.cs` deploy artifact. Runtime/behavioral validation
+  is still in-world (no test harness exists for the PB API).
 - **Relationship to Skippy-Shuttle:** shares the IGC wire protocol (`SkippyShuttleNet`,
   pipe-delimited reports) so a SkippyFlight ship and a Skippy-Shuttle base interoperate. Config
   idioms (`MyIni`, `[sf]`/`[route]`/`[state]` sections) shared by convention, not code.

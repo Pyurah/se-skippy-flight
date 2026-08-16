@@ -1,704 +1,121 @@
-const string VERSION = "0.13.0";
-enum TowerMode { Control, Board, Teach }
-string channel = "SkippyShuttleNet";
-string zone = "Main";
-string lcdTag = "[SF]";
-TowerMode mode = TowerMode.Control;
-bool manual = false;
-string remoteName = "";
-double teachSeg = 2.5;
-double teachTurn = 12.0;
-const double HEARTBEAT_SEC = 2.0;
-const double REQ_STALE_SEC = 6.0;
-const double GRANT_MAX_SEC = 180.0;
-const double SIGNAL_STALE_SEC = 20.0;
-const double DT_FALLBACK = 1.0 / 6.0;
-const int PATH_CHUNK = 18;
-IMyBroadcastListener listener;
-double dt;
-double hbTimer;
-long seqCounter;
-long myGrid;
-string activeShip = "";
-string activeAction = "";
-double grantAge;
-string activePad = "";
-Dictionary<string, ShuttleReport> fleet = new Dictionary<string, ShuttleReport>();
-Dictionary<string, PendingReq> pending = new Dictionary<string, PendingReq>();
-Dictionary<string, Pad> pads = new Dictionary<string, Pad>();
-bool haveZone;
-Vector3D zoneCenter, zoneFwd, zoneUp, zoneExt;
-Dictionary<string, List<Vector3D>> padPathRx = new Dictionary<string, List<Vector3D>>();
-const int MAX_TEACH_PATH = 400;
-IMyRemoteControl teachRc;
-List<IMyShipConnector> teachConns = new List<IMyShipConnector>();
-bool recording;
-string recPad = "";
-List<Vector3D> recPath = new List<Vector3D>();
-Vector3D recLast;
-Vector3D recLastDir;
-bool wasDocked;
-string teachMsg = "Ready. REGZONE / REGPAD / REGPATH to begin.";
-class ShuttleReport
-{
-    public string Name, State;
-    public int EtaSec, DistM, Fill;
-    public double MassT;
-    public bool Running;
-    public double Age;
-}
-class PendingReq
-{
-    public string Action;
-    public double Age;
-    public long Seq;
-}
-class Pad
-{
-    public string Name;
-    public Vector3D Pos, Fwd, Up, ConnFwd;
-    public string OccupiedBy = "";
-    public List<Vector3D> Path = new List<Vector3D>();
-}
-Program()
-{
-    Runtime.UpdateFrequency = UpdateFrequency.Update10;
-    myGrid = Me.CubeGrid.EntityId;
-    if (string.IsNullOrWhiteSpace(Me.CustomData)) WriteConfigTemplate();
-    LoadConfig();
-    if (mode == TowerMode.Teach) DiscoverTeach();
-    else listener = IGC.RegisterBroadcastListener(channel);
-}
-void Main(string argument, UpdateType source)
-{
-    dt = Runtime.TimeSinceLastRun.TotalSeconds;
-    if (dt <= 0 || dt > 0.5) dt = DT_FALLBACK;
-    if (mode == TowerMode.Teach)
-    {
-        RunTeach(string.IsNullOrEmpty(argument) ? "" : argument.Trim());
-        RenderTeach();
-        return;
-    }
-    if (!string.IsNullOrEmpty(argument)) HandleCommand(argument.Trim());
-    DrainMessages();
-    AgeTables();
-    if (mode == TowerMode.Control)
-    {
-        ReleaseIfDone();
-        ReleasePads();
-        if (!manual) GrantNext();
-        Heartbeat();
-    }
-    RenderBoard();
-}
-void HandleCommand(string arg)
-{
-    string verb = arg.ToUpperInvariant();
-    if (verb == "MANUAL")               { manual = true;  SaveGrantMode(); }
-    else if (verb == "AUTO")            { manual = false; SaveGrantMode(); }
-    else if (verb == "RELEASE")         ClearSlot();
-    else if (verb == "CLEAR")           ManualGrant(null);
-    else if (verb.StartsWith("CLEAR ")) ManualGrant(arg.Substring(6).Trim());
-    else if (verb.StartsWith("PADFREE ")) FreePad(arg.Substring(8).Trim());
-}
-void DrainMessages()
-{
-    while (listener.HasPendingMessage)
-    {
-        var m = listener.AcceptMessage();
-        var s = m.Data as string;
-        if (s == null) continue;
-        var f = s.Split('|');
-        if (f.Length < 2) continue;
-        if (f[0] == "CMD")
-        {
-            if (mode == TowerMode.Control && f[1] == "REQ" && f.Length >= 5)
-                OnRequest(f[2], f[3], f.Length >= 6 ? ParseLong(f[5], 0) : 0);
-            else if (f[1] == "PAD" && f.Length >= 7)
-                UpsertPad(f[2], f[3], f[4], f[5], f[6]);
-            else if (f[1] == "ZONE" && f.Length >= 6)
-                UpsertZone(f[2], f[3], f[4], f[5]);
-            else if (f[1] == "PADPATH" && f.Length >= 6)
-                OnPadPathChunk(f[2], f[3], f[4], f[5]);
-            continue;
-        }
-        if (f.Length < 7) continue;
-        fleet[f[0]] = new ShuttleReport
-        {
-            Name = f[0],
-            State = f[1],
-            EtaSec = ParseInt(f[2], -1),
-            DistM = ParseInt(f[3], 0),
-            Fill = ParseInt(f[4], 0),
-            MassT = ParseDouble(f[5], 0),
-            Running = f[6] == "1",
-            Age = 0
-        };
-    }
-}
-void OnRequest(string ship, string action, long grid)
-{
-    if (grid != 0 && myGrid != 0 && grid != myGrid) return;
-    if (ship == activeShip)
-    {
-        Send(ClearMsg());
-        return;
-    }
-    PendingReq p;
-    if (pending.TryGetValue(ship, out p))
-    {
-        p.Action = action;
-        p.Age = 0;
-    }
-    else
-    {
-        pending[ship] = new PendingReq { Action = action, Age = 0, Seq = seqCounter++ };
-    }
-    if (activeShip.Length > 0)
-        Send("CMD|HOLD|" + ship + "|" + action + "|traffic");
-    else if (action == "LAND" && pads.Count > 0 && FirstFreePad() == null)
-        Send("CMD|HOLD|" + ship + "|" + action + "|no pad");
-}
-void AgeTables()
-{
-    foreach (var r in fleet.Values) r.Age += dt;
-    if (pending.Count > 0)
-    {
-        var drop = new List<string>();
-        foreach (var kv in pending)
-        {
-            kv.Value.Age += dt;
-            if (kv.Value.Age > REQ_STALE_SEC) drop.Add(kv.Key);
-        }
-        foreach (var k in drop) pending.Remove(k);
-    }
-}
-void ReleaseIfDone()
-{
-    if (activeShip.Length == 0) return;
-    grantAge += dt;
-    bool done = false;
-    ShuttleReport r;
-    if (!fleet.TryGetValue(activeShip, out r) || r.Age > SIGNAL_STALE_SEC)
-        done = true;
-    else if (r.State == "Faulted" || r.State == "Idle")
-        done = true;
-    else if (activeAction == "DEPART" && IsCruiseState(r.State))
-        done = true;
-    else if (activeAction == "LAND" && IsDockedState(r.State))
-        done = true;
-    else if (grantAge > GRANT_MAX_SEC)
-        done = true;
-    if (done) ClearSlot();
-}
-void GrantNext()
-{
-    if (activeShip.Length > 0 || pending.Count == 0) return;
-    string bestShip = null;
-    PendingReq best = null;
-    foreach (var kv in pending)
-    {
-        if (!Grantable(kv.Value.Action)) continue;
-        if (best == null || Better(kv.Value, best)) { best = kv.Value; bestShip = kv.Key; }
-    }
-    if (bestShip == null) return;
-    Grant(bestShip, best.Action);
-}
-bool Better(PendingReq a, PendingReq b)
-{
-    bool landA = a.Action == "LAND", landB = b.Action == "LAND";
-    if (landA != landB) return landA;
-    return a.Seq < b.Seq;
-}
-void ManualGrant(string ship)
-{
-    if (activeShip.Length > 0 || pending.Count == 0) return;
-    if (ship == null) { GrantNext(); return; }
-    PendingReq p;
-    if (!pending.TryGetValue(ship, out p)) return;
-    if (!Grantable(p.Action)) return;
-    Grant(ship, p.Action);
-}
-void Grant(string ship, string action)
-{
-    activeShip = ship;
-    activeAction = action;
-    grantAge = 0;
-    activePad = "";
-    pending.Remove(ship);
-    if (action == "LAND")
-    {
-        activePad = FirstFreePad();
-        if (activePad != null) pads[activePad].OccupiedBy = ship;
-        else activePad = "";
-    }
-    Send(ClearMsg());
-    StreamGrantPath(ship, action);
-}
-void StreamGrantPath(string ship, string action)
-{
-    Pad pd = null;
-    if (action == "LAND" && activePad.Length > 0) pads.TryGetValue(activePad, out pd);
-    else if (action == "DEPART")
-    {
-        foreach (var p in pads.Values) if (p.OccupiedBy == ship) { pd = p; break; }
-    }
-    if (pd == null || pd.Path.Count == 0) return;
-    StreamPath(ship, pd.Path);
-}
-void StreamPath(string ship, List<Vector3D> path)
-{
-    int total = (path.Count + PATH_CHUNK - 1) / PATH_CHUNK;
-    if (total == 0) return;
-    for (int seq = 0; seq < total; seq++)
-        Send("CMD|PATH|" + ship + "|" + seq + "|" + total + "|" + PathStr(path, seq * PATH_CHUNK, PATH_CHUNK));
-}
-string PathStr(List<Vector3D> path, int start, int count)
-{
-    var sb = new StringBuilder();
-    int end = Math.Min(start + count, path.Count);
-    for (int i = start; i < end; i++)
-    {
-        if (i > start) sb.Append(';');
-        sb.Append(Vec(path[i]));
-    }
-    return sb.ToString();
-}
-void ParsePath(string payload, List<Vector3D> buf)
-{
-    if (string.IsNullOrEmpty(payload)) return;
-    var parts = payload.Split(';');
-    Vector3D v;
-    foreach (var pt in parts) if (TryVec(pt, out v)) buf.Add(v);
-}
-bool Grantable(string action)
-{
-    return action != "LAND" || pads.Count == 0 || FirstFreePad() != null;
-}
-string ClearMsg()
-{
-    string m = "CMD|CLEAR|" + activeShip + "|" + activeAction;
-    if (activeAction == "LAND" && activePad.Length > 0)
-    {
-        var pd = pads[activePad];
-        m += "|" + activePad + "|" + Vec(pd.Pos) + "|" + Vec(pd.Fwd) + "|" + Vec(pd.Up) + "|" + Vec(pd.ConnFwd);
-    }
-    return m;
-}
-string FirstFreePad()
-{
-    foreach (var pd in pads.Values)
-        if (pd.OccupiedBy.Length == 0) return pd.Name;
-    return null;
-}
-void ReleasePads()
-{
-    foreach (var pd in pads.Values)
-    {
-        if (pd.OccupiedBy.Length == 0) continue;
-        ShuttleReport r;
-        if (!fleet.TryGetValue(pd.OccupiedBy, out r) || r.Age > SIGNAL_STALE_SEC) pd.OccupiedBy = "";
-        else if (r.State == "Faulted" || r.State == "Idle") pd.OccupiedBy = "";
-        else if (IsCruiseState(r.State)) pd.OccupiedBy = "";
-    }
-}
-void UpsertPad(string name, string pos, string fwd, string up, string cf)
-{
-    Vector3D p, fw, u, c;
-    if (!(TryVec(pos, out p) & TryVec(fwd, out fw) & TryVec(up, out u) & TryVec(cf, out c))) return;
-    Pad pd;
-    if (!pads.TryGetValue(name, out pd)) { pd = new Pad { Name = name }; pads[name] = pd; }
-    pd.Pos = p; pd.Fwd = fw; pd.Up = u; pd.ConnFwd = c;
-    SavePads();
-}
-void UpsertZone(string center, string fwd, string up, string ext)
-{
-    Vector3D c, fw, u, e;
-    if (!(TryVec(center, out c) & TryVec(fwd, out fw) & TryVec(up, out u) & TryVec(ext, out e))) return;
-    zoneCenter = c; zoneFwd = fw; zoneUp = u; zoneExt = e;
-    haveZone = true;
-    SaveZone();
-}
-void OnPadPathChunk(string pad, string seqS, string totalS, string payload)
-{
-    int seq = ParseInt(seqS, -1), total = ParseInt(totalS, 0);
-    if (seq < 0 || total <= 0) return;
-    List<Vector3D> buf;
-    if (seq == 0 || !padPathRx.TryGetValue(pad, out buf)) { buf = new List<Vector3D>(); padPathRx[pad] = buf; }
-    ParsePath(payload, buf);
-    if (seq == total - 1)
-    {
-        Pad pd;
-        if (!pads.TryGetValue(pad, out pd)) { pd = new Pad { Name = pad }; pads[pad] = pd; }
-        pd.Path = buf;
-        padPathRx.Remove(pad);
-        SavePads();
-    }
-}
-void FreePad(string name)
-{
-    Pad pd;
-    if (pads.TryGetValue(name, out pd)) pd.OccupiedBy = "";
-}
-void ClearSlot()
-{
-    activeShip = "";
-    activeAction = "";
-    grantAge = 0;
-    activePad = "";
-}
-void Heartbeat()
-{
-    hbTimer += dt;
-    if (hbTimer < HEARTBEAT_SEC) return;
-    hbTimer = 0;
-    string m = "CMD|TOWER|" + zone + "|" + myGrid;
-    if (haveZone)
-        m += "|" + Vec(zoneCenter) + "|" + Vec(zoneFwd) + "|" + Vec(zoneUp) + "|" + Vec(zoneExt);
-    Send(m);
-}
-bool IsCruiseState(string s) { return s == "CruiseToDest" || s == "CruiseToHome"; }
-bool IsDockedState(string s) { return s == "Loading" || s == "Unloading"; }
-void Send(string msg) { IGC.SendBroadcastMessage(channel, msg); }
-void RenderBoard()
-{
-    var sb = new StringBuilder();
-    sb.Append("== Skippy Tower v").Append(VERSION).Append(" ==\n");
-    if (mode == TowerMode.Control)
-        sb.Append("CONTROL/").Append(manual ? "MANUAL" : "AUTO").Append(" - zone ").Append(zone).Append('\n');
-    else
-        sb.Append("BOARD (passive)\n");
-    sb.Append('\n');
-    if (fleet.Count == 0) sb.Append("Waiting for shuttle signal...\n");
-    foreach (var r in fleet.Values)
-    {
-        if (r.Age > SIGNAL_STALE_SEC)
-        {
-            sb.Append(r.Name).Append(": NO SIGNAL (").Append((int)r.Age).Append("s)\n\n");
-            continue;
-        }
-        sb.Append(r.Name).Append(": ").Append(PrettyState(r.State)).Append('\n');
-        if (r.EtaSec >= 0)
-            sb.Append("   ETA ").Append((r.EtaSec / 60).ToString("00")).Append(':').Append((r.EtaSec % 60).ToString("00"))
-              .Append("   ").Append((r.DistM / 1000.0).ToString("0.0")).Append(" km\n");
-        sb.Append("   Cargo ").Append(r.Fill).Append("%   ").Append(r.MassT.ToString("0.0")).Append("t\n");
-        if (mode == TowerMode.Control)
-        {
-            if (r.Name == activeShip) sb.Append("   > CLEARED: ").Append(activeAction).Append('\n');
-            else if (pending.ContainsKey(r.Name)) sb.Append(manual ? "   || WAITING (your OK)\n" : "   || HOLD (traffic)\n");
-        }
-        sb.Append('\n');
-    }
-    if (mode == TowerMode.Control)
-    {
-        if (activeShip.Length > 0)
-            sb.Append("Slot: ").Append(activeShip).Append(" (").Append(activeAction).Append(")\n");
-        else if (manual && pending.Count > 0)
-        {
-            string ns = null; PendingReq nb = null;
-            foreach (var kv in pending)
-                if (nb == null || Better(kv.Value, nb)) { nb = kv.Value; ns = kv.Key; }
-            sb.Append("Next: ").Append(ns).Append(" (").Append(nb.Action).Append(") - run CLEAR\n");
-        }
-        else
-            sb.Append("Slot: free\n");
-        if (haveZone)
-            sb.Append("Zone: ").Append((zoneExt.X * 2).ToString("0")).Append('x')
-              .Append((zoneExt.Y * 2).ToString("0")).Append('x').Append((zoneExt.Z * 2).ToString("0")).Append("m\n");
-        if (pads.Count > 0)
-        {
-            sb.Append("-- Pads --\n");
-            foreach (var pd in pads.Values)
-            {
-                sb.Append(pd.Name).Append(": ").Append(pd.OccupiedBy.Length > 0 ? pd.OccupiedBy : "free");
-                if (pd.Path.Count > 0) sb.Append(" (").Append(pd.Path.Count).Append("wp)");
-                sb.Append('\n');
-            }
-        }
-    }
-    var text = sb.ToString();
-    Echo(text);
-    var panels = new List<IMyTextPanel>();
-    GridTerminalSystem.GetBlocksOfType(panels, b => b.CubeGrid.IsSameConstructAs(Me.CubeGrid) && b.CustomName.Contains(lcdTag));
-    foreach (var p in panels) { p.ContentType = ContentType.TEXT_AND_IMAGE; p.WriteText(text); }
-    Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
-    Me.GetSurface(0).WriteText(text);
-}
-string PrettyState(string s)
-{
-    switch (s)
-    {
-        case "Loading":      return "Loading at home";
-        case "CruiseToDest": return "En route to station";
-        case "ApproachDest": return "Docking at station";
-        case "Unloading":    return "Unloading at station";
-        case "CruiseToHome": return "Returning home";
-        case "ApproachHome": return "Docking at home";
-        case "Idle":         return "Idle";
-        case "Faulted":      return "FAULT - needs attention";
-        default:             return s;
-    }
-}
-void RunTeach(string arg)
-{
-    if (teachRc == null || teachConns.Count == 0) DiscoverTeach();
-    if (teachRc == null) { teachMsg = "! No Remote Control on this grid - teach needs one."; return; }
-    if (arg.Length > 0) HandleTeachCommand(arg);
-    if (recording)
-    {
-        if (recPath.Count < MAX_TEACH_PATH) TickTeachRecord();
-        bool docked = ConnectedTeachConn() != null;
-        if (docked && !wasDocked) FinalizePath();
-        wasDocked = docked;
-    }
-}
-void HandleTeachCommand(string arg)
-{
-    int sp = arg.IndexOf(' ');
-    string verb = (sp < 0 ? arg : arg.Substring(0, sp)).ToUpperInvariant();
-    string rest = sp < 0 ? "" : arg.Substring(sp + 1).Trim();
-    if (verb == "REGZONE") RegZone(rest);
-    else if (verb == "REGPAD")
-    {
-        if (rest.Length == 0) { teachMsg = "REGPAD needs a pad name."; return; }
-        RegPad(rest);
-    }
-    else if (verb == "REGPATH")
-    {
-        string up = rest.ToUpperInvariant();
-        if (up == "END") { if (recording) FinalizePath(); else teachMsg = "REGPATH END: nothing recording."; }
-        else if (up == "CANCEL") { recording = false; recPad = ""; recPath.Clear(); teachMsg = "Path recording cancelled."; }
-        else if (rest.Length == 0) teachMsg = "REGPATH needs a pad name (or END / CANCEL).";
-        else StartPath(rest);
-    }
-}
-void RegZone(string arg)
-{
-    double w = 20, h = 20, d = 20;
-    var t = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-    if (t.Length >= 1) w = ParseDouble(t[0], w);
-    if (t.Length >= 2) h = ParseDouble(t[1], h);
-    if (t.Length >= 3) d = ParseDouble(t[2], d);
-    zoneCenter = teachRc.GetPosition();
-    zoneFwd = teachRc.WorldMatrix.Forward;
-    zoneUp = teachRc.WorldMatrix.Up;
-    zoneExt = new Vector3D(w / 2, h / 2, d / 2);
-    haveZone = true;
-    Send("CMD|ZONE|" + Vec(zoneCenter) + "|" + Vec(zoneFwd) + "|" + Vec(zoneUp) + "|" + Vec(zoneExt));
-    teachMsg = "Zone sent: " + w.ToString("0") + "x" + h.ToString("0") + "x" + d.ToString("0") + "m.";
-}
-void RegPad(string name)
-{
-    var c = ConnectedTeachConn();
-    if (c == null) { teachMsg = "REGPAD: dock at pad '" + name + "' first."; return; }
-    SendPad(name, c);
-    teachMsg = "Pad '" + name + "' pose sent (open-air).";
-}
-void StartPath(string name)
-{
-    recording = true;
-    recPad = name;
-    recPath.Clear();
-    recLast = teachRc.GetPosition();
-    recPath.Add(recLast);
-    recLastDir = Vector3D.Zero;
-    wasDocked = ConnectedTeachConn() != null;
-    teachMsg = "Recording path to '" + name + "' - fly the corridor in and dock.";
-}
-void TickTeachRecord()
-{
-    Vector3D p = teachRc.GetPosition();
-    double moved = Vector3D.Distance(p, recLast);
-    if (moved < 0.5) return;
-    Vector3D dir = Vector3D.Normalize(p - recLast);
-    double turn = recLastDir == Vector3D.Zero ? 0
-                : Math.Acos(MathHelper.Clamp(dir.Dot(recLastDir), -1, 1)) * 180.0 / Math.PI;
-    if (moved >= teachSeg || (moved >= 1.0 && turn >= teachTurn))
-    {
-        recPath.Add(p);
-        recLast = p;
-        recLastDir = dir;
-    }
-}
-void FinalizePath()
-{
-    var c = ConnectedTeachConn();
-    SendPath(recPad, recPath);
-    if (c != null)
-    {
-        SendPad(recPad, c);
-        teachMsg = "Path '" + recPad + "' sent (" + recPath.Count + "wp) + pad pose.";
-    }
-    else
-    {
-        teachMsg = "Path '" + recPad + "' sent (" + recPath.Count + "wp); not docked, no pose.";
-    }
-    recording = false;
-    recPad = "";
-    recPath.Clear();
-}
-void SendPad(string name, IMyShipConnector c)
-{
-    Send("CMD|PAD|" + name + "|" + Vec(teachRc.GetPosition()) + "|" + Vec(teachRc.WorldMatrix.Forward)
-       + "|" + Vec(teachRc.WorldMatrix.Up) + "|" + Vec(c.WorldMatrix.Forward));
-}
-void SendPath(string pad, List<Vector3D> path)
-{
-    int total = (path.Count + PATH_CHUNK - 1) / PATH_CHUNK;
-    if (total == 0) return;
-    for (int seq = 0; seq < total; seq++)
-        Send("CMD|PADPATH|" + pad + "|" + seq + "|" + total + "|" + PathStr(path, seq * PATH_CHUNK, PATH_CHUNK));
-}
-IMyShipConnector ConnectedTeachConn()
-{
-    foreach (var c in teachConns) if (c.Status == MyShipConnectorStatus.Connected) return c;
-    return null;
-}
-void DiscoverTeach()
-{
-    var grid = Me.CubeGrid;
-    if (!string.IsNullOrEmpty(remoteName))
-        teachRc = GridTerminalSystem.GetBlockWithName(remoteName) as IMyRemoteControl;
-    if (teachRc == null)
-    {
-        var rcs = new List<IMyRemoteControl>();
-        GridTerminalSystem.GetBlocksOfType(rcs, b => b.CubeGrid == grid);
-        teachRc = rcs.Count > 0 ? rcs[0] : null;
-    }
-    teachConns.Clear();
-    GridTerminalSystem.GetBlocksOfType(teachConns, b => b.CubeGrid == grid);
-}
-void RenderTeach()
-{
-    var sb = new StringBuilder();
-    sb.Append("== Skippy Teach v").Append(VERSION).Append(" ==\n");
-    sb.Append("Ship setup helper (channel ").Append(channel).Append(")\n\n");
-    if (teachRc == null) sb.Append("! No Remote Control found on this grid.\n");
-    else
-    {
-        bool docked = ConnectedTeachConn() != null;
-        sb.Append("Zone: ").Append(haveZone
-            ? (zoneExt.X * 2).ToString("0") + "x" + (zoneExt.Y * 2).ToString("0") + "x" + (zoneExt.Z * 2).ToString("0") + "m defined"
-            : "not set - run REGZONE").Append('\n');
-        sb.Append("Dock: ").Append(docked ? "CONNECTED" : "free").Append('\n');
-        if (recording)
-            sb.Append("REC '").Append(recPad).Append("': ").Append(recPath.Count).Append(" wp (fly in + dock)\n");
-        sb.Append('\n');
-    }
-    sb.Append(teachMsg).Append('\n');
-    sb.Append("\nCommands: REGZONE [w h d] | REGPATH <pad> | REGPATH END/CANCEL | REGPAD <pad>\n");
-    var text = sb.ToString();
-    Echo(text);
-    var panels = new List<IMyTextPanel>();
-    GridTerminalSystem.GetBlocksOfType(panels, b => b.CubeGrid.IsSameConstructAs(Me.CubeGrid) && b.CustomName.Contains(lcdTag));
-    foreach (var p in panels) { p.ContentType = ContentType.TEXT_AND_IMAGE; p.WriteText(text); }
-    Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
-    Me.GetSurface(0).WriteText(text);
-}
-void WriteConfigTemplate()
-{
-    var ini = new MyIni();
-    ini.TryParse(Me.CustomData);
-    WriteSection(ini);
-    Me.CustomData = ini.ToString();
-}
-void WriteSection(MyIni ini)
-{
-    ini.Set("sf", "channel", channel);
-    ini.Set("sf", "zone", zone);
-    ini.Set("sf", "lcdTag", lcdTag);
-    ini.Set("sf", "towerMode", mode == TowerMode.Board ? "board" : mode == TowerMode.Teach ? "teach" : "control");
-    ini.Set("sf", "grant", manual ? "manual" : "auto");
-    ini.Set("sf", "remoteName", remoteName);
-    ini.Set("sf", "teachSeg", teachSeg);
-    ini.Set("sf", "teachTurn", teachTurn);
-}
-void SaveGrantMode()
-{
-    var ini = new MyIni();
-    ini.TryParse(Me.CustomData);
-    ini.Set("sf", "grant", manual ? "manual" : "auto");
-    Me.CustomData = ini.ToString();
-}
-void SavePads()
-{
-    var ini = new MyIni();
-    ini.TryParse(Me.CustomData);
-    foreach (var pd in pads.Values)
-    {
-        string s = "pad." + pd.Name;
-        ini.Set(s, "pos", Vec(pd.Pos));
-        ini.Set(s, "fwd", Vec(pd.Fwd));
-        ini.Set(s, "up", Vec(pd.Up));
-        ini.Set(s, "connFwd", Vec(pd.ConnFwd));
-        ini.Set(s, "path", JoinPath(pd.Path));
-    }
-    Me.CustomData = ini.ToString();
-}
-void SaveZone()
-{
-    var ini = new MyIni();
-    ini.TryParse(Me.CustomData);
-    ini.Set("zone", "center", Vec(zoneCenter));
-    ini.Set("zone", "fwd", Vec(zoneFwd));
-    ini.Set("zone", "up", Vec(zoneUp));
-    ini.Set("zone", "ext", Vec(zoneExt));
-    Me.CustomData = ini.ToString();
-}
-string JoinPath(List<Vector3D> path) { return path.Count == 0 ? "" : PathStr(path, 0, path.Count); }
-void LoadConfig()
-{
-    var ini = new MyIni();
-    if (!ini.TryParse(Me.CustomData)) return;
-    channel = ini.Get("sf", "channel").ToString(channel);
-    zone = ini.Get("sf", "zone").ToString(zone);
-    lcdTag = ini.Get("sf", "lcdTag").ToString(lcdTag);
-    string tm = ini.Get("sf", "towerMode").ToString("control").Trim().ToLowerInvariant();
-    mode = tm == "board" ? TowerMode.Board : tm == "teach" ? TowerMode.Teach : TowerMode.Control;
-    manual = ini.Get("sf", "grant").ToString("auto").Trim().ToLowerInvariant() == "manual";
-    remoteName = ini.Get("sf", "remoteName").ToString(remoteName);
-    teachSeg = ini.Get("sf", "teachSeg").ToDouble(teachSeg);
-    teachTurn = ini.Get("sf", "teachTurn").ToDouble(teachTurn);
-    haveZone = false;
-    Vector3D zc, zf, zu, ze;
-    if (TryVec(ini.Get("zone", "center").ToString(), out zc)
-      & TryVec(ini.Get("zone", "fwd").ToString(), out zf)
-      & TryVec(ini.Get("zone", "up").ToString(), out zu)
-      & TryVec(ini.Get("zone", "ext").ToString(), out ze))
-    {
-        zoneCenter = zc; zoneFwd = zf; zoneUp = zu; zoneExt = ze; haveZone = true;
-    }
-    pads.Clear();
-    var secs = new List<string>();
-    ini.GetSections(secs);
-    foreach (var s in secs)
-    {
-        if (!s.StartsWith("pad.")) continue;
-        string name = s.Substring(4);
-        Vector3D p, fw, u, c;
-        if (TryVec(ini.Get(s, "pos").ToString(), out p)
-          & TryVec(ini.Get(s, "fwd").ToString(), out fw)
-          & TryVec(ini.Get(s, "up").ToString(), out u)
-          & TryVec(ini.Get(s, "connFwd").ToString(), out c))
-        {
-            var pd = new Pad { Name = name, Pos = p, Fwd = fw, Up = u, ConnFwd = c };
-            ParsePath(ini.Get(s, "path").ToString(), pd.Path);
-            pads[name] = pd;
-        }
-    }
-}
-int ParseInt(string s, int def) { int r; return int.TryParse(s, out r) ? r : def; }
-long ParseLong(string s, long def) { long r; return long.TryParse(s, out r) ? r : def; }
-double ParseDouble(string s, double def) { double r; return double.TryParse(s, out r) ? r : def; }
-string Vec(Vector3D v) { return v.X.ToString("R") + ":" + v.Y.ToString("R") + ":" + v.Z.ToString("R"); }
-bool TryVec(string s, out Vector3D v)
-{
-    v = Vector3D.Zero;
-    if (string.IsNullOrEmpty(s)) return false;
-    var p = s.Split(':');
-    if (p.Length != 3) return false;
-    double x, y, z;
-    if (!double.TryParse(p[0], out x) || !double.TryParse(p[1], out y) || !double.TryParse(p[2], out z)) return false;
-    v = new Vector3D(x, y, z);
-    return true;
-}
+// SkippyTower - Space Engineers control tower / status board for the Skippy fleet.
+// Generated by MDK2 (Mal.Mdk2.PbPackager) from the SkippyTower project - do not edit
+// the deployed script by hand. Source of truth: SkippyTower/Program.cs. Full docs in
+// README.md / CHANGELOG.md.
+// 
+const string A="0.13.0";enum E{B,C,D}string F="SkippyShuttleNet";string G="Main",H="[SF]",I="",J="",K="",L=
+"Ready. REGZONE / REGPAD / REGPATH to begin.";E M=E.B;bool N=false,O,P;string Q="";double R=2.5,S=12.0,T,U,V;const double W=2.0,X=6.0,Y=180.0,Z=20.0,a=1.0/6.0;const
+int b=18,c=400;IMyBroadcastListener d;long e,f;string g="";Dictionary<string,h>i=new Dictionary<string,h>();Dictionary<
+string,j>k=new Dictionary<string,j>();Dictionary<string,l>m=new Dictionary<string,l>();bool n;Vector3D o,p,q,r,s,t;Dictionary<
+string,List<Vector3D>>u=new Dictionary<string,List<Vector3D>>();IMyRemoteControl v;List<IMyShipConnector>w=new List<
+IMyShipConnector>();List<Vector3D>x=new List<Vector3D>();class h{public string y,z;public int ª,µ,º;public double À,Á;public bool Â;}
+class j{public string Ã;public double Á;public long Ä;}class l{public string y,Å="";public Vector3D Æ,Ç,È,É;public List<
+Vector3D>Ê=new List<Vector3D>();}
+Program
+(){Runtime.UpdateFrequency=UpdateFrequency.Update10;f=Me.CubeGrid.EntityId;if(string.IsNullOrWhiteSpace(Me.CustomData))Ë(
+);Ì();if(M==E.D)Í();else d=IGC.RegisterBroadcastListener(F);}void
+ Main
+(string Î,UpdateType Ï){T=Runtime.TimeSinceLastRun.TotalSeconds;if(T<=0||T>0.5)T=a;if(M==E.D){Ð(string.IsNullOrEmpty(Î)?
+"":Î.Trim());Ñ();return;}if(!string.IsNullOrEmpty(Î))Ò(Î.Trim());Ó();Ô();if(M==E.B){Õ();Ö();if(!N)Ø();Ù();}Ú();}void Ò(
+string Û){string Ü=Û.ToUpperInvariant();if(Ü=="MANUAL"){N=true;Ý();}else if(Ü=="AUTO"){N=false;Ý();}else if(Ü=="RELEASE")Þ();
+else if(Ü=="CLEAR")ß(null);else if(Ü.StartsWith("CLEAR "))ß(Û.Substring(6).Trim());else if(Ü.StartsWith("PADFREE "))à(Û.
+Substring(8).Trim());}void Ó(){while(d.HasPendingMessage){var á=d.AcceptMessage();var â=á.Data as string;if(â==null)continue;var
+ã=â.Split('|');if(ã.Length<2)continue;if(ã[0]=="CMD"){if(M==E.B&&ã[1]=="REQ"&&ã.Length>=5)ä(ã[2],ã[3],ã.Length>=6?å(ã[5],
+0):0);else if(ã[1]=="PAD"&&ã.Length>=7)æ(ã[2],ã[3],ã[4],ã[5],ã[6]);else if(ã[1]=="ZONE"&&ã.Length>=6)ç(ã[2],ã[3],ã[4],ã[5
+]);else if(ã[1]=="PADPATH"&&ã.Length>=6)è(ã[2],ã[3],ã[4],ã[5]);continue;}if(ã.Length<7)continue;i[ã[0]]=new h{y=ã[0],z=ã[
+1],ª=é(ã[2],-1),µ=é(ã[3],0),º=é(ã[4],0),À=ê(ã[5],0),Â=ã[6]=="1",Á=0};}}void ä(string ë,string ì,long í){if(í!=0&&f!=0&&í
+!=f)return;if(ë==g){î(ï());return;}j ð;if(k.TryGetValue(ë,out ð)){ð.Ã=ì;ð.Á=0;}else{k[ë]=new j{Ã=ì,Á=0,Ä=e++};}if(g.Length
+>0)î("CMD|HOLD|"+ë+"|"+ì+"|traffic");else if(ì=="LAND"&&m.Count>0&&ñ()==null)î("CMD|HOLD|"+ë+"|"+ì+"|no pad");}void Ô(){
+foreach(var ò in i.Values)ò.Á+=T;if(k.Count>0){var ó=new List<string>();foreach(var ô in k){ô.Value.Á+=T;if(ô.Value.Á>X)ó.Add(ô
+.Key);}foreach(var õ in ó)k.Remove(õ);}}void Õ(){if(g.Length==0)return;V+=T;bool ö=false;h ò;if(!i.TryGetValue(g,out ò)||
+ò.Á>Z)ö=true;else if(ò.z=="Faulted"||ò.z=="Idle")ö=true;else if(I=="DEPART"&&ø(ò.z))ö=true;else if(I=="LAND"&&ù(ò.z))ö=
+true;else if(V>Y)ö=true;if(ö)Þ();}void Ø(){if(g.Length>0||k.Count==0)return;string ú=null;j û=null;foreach(var ô in k){if(!ü
+(ô.Value.Ã))continue;if(û==null||ý(ô.Value,û)){û=ô.Value;ú=ô.Key;}}if(ú==null)return;þ(ú,û.Ã);}bool ý(j ÿ,j Ā){bool ā=ÿ.Ã
+=="LAND",Ă=Ā.Ã=="LAND";if(ā!=Ă)return ā;return ÿ.Ä<Ā.Ä;}void ß(string ë){if(g.Length>0||k.Count==0)return;if(ë==null){Ø();
+return;}j ð;if(!k.TryGetValue(ë,out ð))return;if(!ü(ð.Ã))return;þ(ë,ð.Ã);}void þ(string ë,string ì){g=ë;I=ì;V=0;J="";k.Remove(
+ë);if(ì=="LAND"){J=ñ();if(J!=null)m[J].Å=ë;else J="";}î(ï());ă(ë,ì);}void ă(string ë,string ì){l Ą=null;if(ì=="LAND"&&J.
+Length>0)m.TryGetValue(J,out Ą);else if(ì=="DEPART"){foreach(var ð in m.Values)if(ð.Å==ë){Ą=ð;break;}}if(Ą==null||Ą.Ê.Count==0
+)return;ą(ë,Ą.Ê);}void ą(string ë,List<Vector3D>Ć){int ć=(Ć.Count+b-1)/b;if(ć==0)return;for(int Ĉ=0;Ĉ<ć;Ĉ++)î("CMD|PATH|"
++ë+"|"+Ĉ+"|"+ć+"|"+ĉ(Ć,Ĉ*b,b));}string ĉ(List<Vector3D>Ć,int Ċ,int ċ){var Č=new StringBuilder();int č=Math.Min(Ċ+ċ,Ć.
+Count);for(int Ď=Ċ;Ď<č;Ď++){if(Ď>Ċ)Č.Append(';');Č.Append(ď(Ć[Ď]));}return Č.ToString();}void Ė(string Đ,List<Vector3D>đ){if(
+string.IsNullOrEmpty(Đ))return;var Ē=Đ.Split(';');Vector3D ē;foreach(var ĕ in Ē)if(Ĕ(ĕ,out ē))đ.Add(ē);}bool ü(string ì){
+return ì!="LAND"||m.Count==0||ñ()!=null;}string ï(){string á="CMD|CLEAR|"+g+"|"+I;if(I=="LAND"&&J.Length>0){var Ą=m[J];á+="|"+
+J+"|"+ď(Ą.Æ)+"|"+ď(Ą.Ç)+"|"+ď(Ą.È)+"|"+ď(Ą.É);}return á;}string ñ(){foreach(var Ą in m.Values)if(Ą.Å.Length==0)return Ą.y
+;return null;}void Ö(){foreach(var Ą in m.Values){if(Ą.Å.Length==0)continue;h ò;if(!i.TryGetValue(Ą.Å,out ò)||ò.Á>Z)Ą.Å=
+"";else if(ò.z=="Faulted"||ò.z=="Idle")Ą.Å="";else if(ø(ò.z))Ą.Å="";}}void æ(string ė,string Ę,string ę,string Ě,string ě)
+{Vector3D ð,Ĝ,ĝ,Ğ;if(!(Ĕ(Ę,out ð)&Ĕ(ę,out Ĝ)&Ĕ(Ě,out ĝ)&Ĕ(ě,out Ğ)))return;l Ą;if(!m.TryGetValue(ė,out Ą)){Ą=new l{y=ė};m
+[ė]=Ą;}Ą.Æ=ð;Ą.Ç=Ĝ;Ą.È=ĝ;Ą.É=Ğ;ğ();}void ç(string Ġ,string ę,string Ě,string ġ){Vector3D Ğ,Ĝ,ĝ,Ģ;if(!(Ĕ(Ġ,out Ğ)&Ĕ(ę,out
+Ĝ)&Ĕ(Ě,out ĝ)&Ĕ(ġ,out Ģ)))return;o=Ğ;p=Ĝ;q=ĝ;r=Ģ;n=true;ģ();}void è(string Ĥ,string ĥ,string Ħ,string Đ){int Ĉ=é(ĥ,-1),ć=
+é(Ħ,0);if(Ĉ<0||ć<=0)return;List<Vector3D>đ;if(Ĉ==0||!u.TryGetValue(Ĥ,out đ)){đ=new List<Vector3D>();u[Ĥ]=đ;}Ė(Đ,đ);if(Ĉ==
+ć-1){l Ą;if(!m.TryGetValue(Ĥ,out Ą)){Ą=new l{y=Ĥ};m[Ĥ]=Ą;}Ą.Ê=đ;u.Remove(Ĥ);ğ();}}void à(string ė){l Ą;if(m.TryGetValue(ė
+,out Ą))Ą.Å="";}void Þ(){g="";I="";V=0;J="";}void Ù(){U+=T;if(U<W)return;U=0;string á="CMD|TOWER|"+G+"|"+f;if(n)á+="|"+ď(
+o)+"|"+ď(p)+"|"+ď(q)+"|"+ď(r);î(á);}bool ø(string â){return â=="CruiseToDest"||â=="CruiseToHome";}bool ù(string â){return
+â=="Loading"||â=="Unloading";}void î(string ħ){IGC.SendBroadcastMessage(F,ħ);}void Ú(){var Č=new StringBuilder();Č.Append
+("== Skippy Tower v").Append(A).Append(" ==\n");if(M==E.B)Č.Append("CONTROL/").Append(N?"MANUAL":"AUTO").Append(
+" - zone ").Append(G).Append('\n');else Č.Append("BOARD (passive)\n");Č.Append('\n');if(i.Count==0)Č.Append(
+"Waiting for shuttle signal...\n");foreach(var ò in i.Values){if(ò.Á>Z){Č.Append(ò.y).Append(": NO SIGNAL (").Append((int)ò.Á).Append("s)\n\n");continue;
+}Č.Append(ò.y).Append(": ").Append(Ĩ(ò.z)).Append('\n');if(ò.ª>=0)Č.Append("   ETA ").Append((ò.ª/60).ToString("00")).
+Append(':').Append((ò.ª%60).ToString("00")).Append("   ").Append((ò.µ/1000.0).ToString("0.0")).Append(" km\n");Č.Append(
+"   Cargo ").Append(ò.º).Append("%   ").Append(ò.À.ToString("0.0")).Append("t\n");if(M==E.B){if(ò.y==g)Č.Append("   > CLEARED: ").
+Append(I).Append('\n');else if(k.ContainsKey(ò.y))Č.Append(N?"   || WAITING (your OK)\n":"   || HOLD (traffic)\n");}Č.Append(
+'\n');}if(M==E.B){if(g.Length>0)Č.Append("Slot: ").Append(g).Append(" (").Append(I).Append(")\n");else if(N&&k.Count>0){
+string ĩ=null;j Ī=null;foreach(var ô in k)if(Ī==null||ý(ô.Value,Ī)){Ī=ô.Value;ĩ=ô.Key;}Č.Append("Next: ").Append(ĩ).Append(
+" (").Append(Ī.Ã).Append(") - run CLEAR\n");}else Č.Append("Slot: free\n");if(n)Č.Append("Zone: ").Append((r.X*2).ToString(
+"0")).Append('x').Append((r.Y*2).ToString("0")).Append('x').Append((r.Z*2).ToString("0")).Append("m\n");if(m.Count>0){Č.
+Append("-- Pads --\n");foreach(var Ą in m.Values){Č.Append(Ą.y).Append(": ").Append(Ą.Å.Length>0?Ą.Å:"free");if(Ą.Ê.Count>0)Č.
+Append(" (").Append(Ą.Ê.Count).Append("wp)");Č.Append('\n');}}}var ī=Č.ToString();Echo(ī);var Ĭ=new List<IMyTextPanel>();
+GridTerminalSystem.GetBlocksOfType(Ĭ,Ā=>Ā.CubeGrid.IsSameConstructAs(Me.CubeGrid)&&Ā.CustomName.Contains(H));foreach(var ð in Ĭ){ð.
+ContentType=ContentType.TEXT_AND_IMAGE;ð.WriteText(ī);}Me.GetSurface(0).ContentType=ContentType.TEXT_AND_IMAGE;Me.GetSurface(0).
+WriteText(ī);}string Ĩ(string â){switch(â){case"Loading":return"Loading at home";case"CruiseToDest":return"En route to station";
+case"ApproachDest":return"Docking at station";case"Unloading":return"Unloading at station";case"CruiseToHome":return
+"Returning home";case"ApproachHome":return"Docking at home";case"Idle":return"Idle";case"Faulted":return"FAULT - needs attention";
+default:return â;}}void Ð(string Û){if(v==null||w.Count==0)Í();if(v==null){L=
+"! No Remote Control on this grid - teach needs one.";return;}if(Û.Length>0)ĭ(Û);if(O){if(x.Count<c)Į();bool İ=į()!=null;if(İ&&!P)ı();P=İ;}}void ĭ(string Û){int Ĳ=Û.IndexOf(
+' ');string Ü=(Ĳ<0?Û:Û.Substring(0,Ĳ)).ToUpperInvariant();string ĳ=Ĳ<0?"":Û.Substring(Ĳ+1).Trim();if(Ü=="REGZONE")Ĵ(ĳ);else
+if(Ü=="REGPAD"){if(ĳ.Length==0){L="REGPAD needs a pad name.";return;}ĵ(ĳ);}else if(Ü=="REGPATH"){string Ě=ĳ.
+ToUpperInvariant();if(Ě=="END"){if(O)ı();else L="REGPATH END: nothing recording.";}else if(Ě=="CANCEL"){O=false;K="";x.Clear();L=
+"Path recording cancelled.";}else if(ĳ.Length==0)L="REGPATH needs a pad name (or END / CANCEL).";else Ķ(ĳ);}}void Ĵ(string Û){double ķ=20,ĸ=20,Ĺ=20
+;var ĺ=Û.Split(new[]{' '},StringSplitOptions.RemoveEmptyEntries);if(ĺ.Length>=1)ķ=ê(ĺ[0],ķ);if(ĺ.Length>=2)ĸ=ê(ĺ[1],ĸ);if
+(ĺ.Length>=3)Ĺ=ê(ĺ[2],Ĺ);o=v.GetPosition();p=v.WorldMatrix.Forward;q=v.WorldMatrix.Up;r=new Vector3D(ķ/2,ĸ/2,Ĺ/2);n=true;
+î("CMD|ZONE|"+ď(o)+"|"+ď(p)+"|"+ď(q)+"|"+ď(r));L="Zone sent: "+ķ.ToString("0")+"x"+ĸ.ToString("0")+"x"+Ĺ.ToString("0")+
+"m.";}void ĵ(string ė){var Ğ=į();if(Ğ==null){L="REGPAD: dock at pad '"+ė+"' first.";return;}Ļ(ė,Ğ);L="Pad '"+ė+
+"' pose sent (open-air).";}void Ķ(string ė){O=true;K=ė;x.Clear();s=v.GetPosition();x.Add(s);t=Vector3D.Zero;P=į()!=null;L="Recording path to '"+ė
++"' - fly the corridor in and dock.";}void Į(){Vector3D ð=v.GetPosition();double ļ=Vector3D.Distance(ð,s);if(ļ<0.5)return
+;Vector3D Ľ=Vector3D.Normalize(ð-s);double ľ=t==Vector3D.Zero?0:Math.Acos(MathHelper.Clamp(Ľ.Dot(t),-1,1))*180.0/Math.PI;
+if(ļ>=R||(ļ>=1.0&&ľ>=S)){x.Add(ð);s=ð;t=Ľ;}}void ı(){var Ğ=į();Ŀ(K,x);if(Ğ!=null){Ļ(K,Ğ);L="Path '"+K+"' sent ("+x.Count+
+"wp) + pad pose.";}else{L="Path '"+K+"' sent ("+x.Count+"wp); not docked, no pose.";}O=false;K="";x.Clear();}void Ļ(string ė,
+IMyShipConnector Ğ){î("CMD|PAD|"+ė+"|"+ď(v.GetPosition())+"|"+ď(v.WorldMatrix.Forward)+"|"+ď(v.WorldMatrix.Up)+"|"+ď(Ğ.WorldMatrix.
+Forward));}void Ŀ(string Ĥ,List<Vector3D>Ć){int ć=(Ć.Count+b-1)/b;if(ć==0)return;for(int Ĉ=0;Ĉ<ć;Ĉ++)î("CMD|PADPATH|"+Ĥ+"|"+Ĉ+
+"|"+ć+"|"+ĉ(Ć,Ĉ*b,b));}IMyShipConnector į(){foreach(var Ğ in w)if(Ğ.Status==MyShipConnectorStatus.Connected)return Ğ;return
+null;}void Í(){var í=Me.CubeGrid;if(!string.IsNullOrEmpty(Q))v=GridTerminalSystem.GetBlockWithName(Q)as IMyRemoteControl;if(
+v==null){var ŀ=new List<IMyRemoteControl>();GridTerminalSystem.GetBlocksOfType(ŀ,Ā=>Ā.CubeGrid==í);v=ŀ.Count>0?ŀ[0]:null;
+}w.Clear();GridTerminalSystem.GetBlocksOfType(w,Ā=>Ā.CubeGrid==í);}void Ñ(){var Č=new StringBuilder();Č.Append(
+"== Skippy Teach v").Append(A).Append(" ==\n");Č.Append("Ship setup helper (channel ").Append(F).Append(")\n\n");if(v==null)Č.Append(
+"! No Remote Control found on this grid.\n");else{bool İ=į()!=null;Č.Append("Zone: ").Append(n?(r.X*2).ToString("0")+"x"+(r.Y*2).ToString("0")+"x"+(r.Z*2).ToString
+("0")+"m defined":"not set - run REGZONE").Append('\n');Č.Append("Dock: ").Append(İ?"CONNECTED":"free").Append('\n');if(O
+)Č.Append("REC '").Append(K).Append("': ").Append(x.Count).Append(" wp (fly in + dock)\n");Č.Append('\n');}Č.Append(L).
+Append('\n');Č.Append("\nCommands: REGZONE [w h d] | REGPATH <pad> | REGPATH END/CANCEL | REGPAD <pad>\n");var ī=Č.ToString();
+Echo(ī);var Ĭ=new List<IMyTextPanel>();GridTerminalSystem.GetBlocksOfType(Ĭ,Ā=>Ā.CubeGrid.IsSameConstructAs(Me.CubeGrid)&&Ā.
+CustomName.Contains(H));foreach(var ð in Ĭ){ð.ContentType=ContentType.TEXT_AND_IMAGE;ð.WriteText(ī);}Me.GetSurface(0).ContentType=
+ContentType.TEXT_AND_IMAGE;Me.GetSurface(0).WriteText(ī);}void Ë(){var Ł=new MyIni();Ł.TryParse(Me.CustomData);ł(Ł);Me.CustomData=Ł
+.ToString();}void ł(MyIni Ł){Ł.Set("sf","channel",F);Ł.Set("sf","zone",G);Ł.Set("sf","lcdTag",H);Ł.Set("sf","towerMode",M
+==E.C?"board":M==E.D?"teach":"control");Ł.Set("sf","grant",N?"manual":"auto");Ł.Set("sf","remoteName",Q);Ł.Set("sf",
+"teachSeg",R);Ł.Set("sf","teachTurn",S);}void Ý(){var Ł=new MyIni();Ł.TryParse(Me.CustomData);Ł.Set("sf","grant",N?"manual":"auto"
+);Me.CustomData=Ł.ToString();}void ğ(){var Ł=new MyIni();Ł.TryParse(Me.CustomData);foreach(var Ą in m.Values){string â=
+"pad."+Ą.y;Ł.Set(â,"pos",ď(Ą.Æ));Ł.Set(â,"fwd",ď(Ą.Ç));Ł.Set(â,"up",ď(Ą.È));Ł.Set(â,"connFwd",ď(Ą.É));Ł.Set(â,"path",Ń(Ą.Ê));}
+Me.CustomData=Ł.ToString();}void ģ(){var Ł=new MyIni();Ł.TryParse(Me.CustomData);Ł.Set("zone","center",ď(o));Ł.Set("zone",
+"fwd",ď(p));Ł.Set("zone","up",ď(q));Ł.Set("zone","ext",ď(r));Me.CustomData=Ł.ToString();}string Ń(List<Vector3D>Ć){return Ć.
+Count==0?"":ĉ(Ć,0,Ć.Count);}void Ì(){var Ł=new MyIni();if(!Ł.TryParse(Me.CustomData))return;F=Ł.Get("sf","channel").ToString(
+F);G=Ł.Get("sf","zone").ToString(G);H=Ł.Get("sf","lcdTag").ToString(H);string ń=Ł.Get("sf","towerMode").ToString(
+"control").Trim().ToLowerInvariant();M=ń=="board"?E.C:ń=="teach"?E.D:E.B;N=Ł.Get("sf","grant").ToString("auto").Trim().
+ToLowerInvariant()=="manual";Q=Ł.Get("sf","remoteName").ToString(Q);R=Ł.Get("sf","teachSeg").ToDouble(R);S=Ł.Get("sf","teachTurn").
+ToDouble(S);n=false;Vector3D Ņ,ņ,Ň,ň;if(Ĕ(Ł.Get("zone","center").ToString(),out Ņ)&Ĕ(Ł.Get("zone","fwd").ToString(),out ņ)&Ĕ(Ł.
+Get("zone","up").ToString(),out Ň)&Ĕ(Ł.Get("zone","ext").ToString(),out ň)){o=Ņ;p=ņ;q=Ň;r=ň;n=true;}m.Clear();var ŉ=new
+List<string>();Ł.GetSections(ŉ);foreach(var â in ŉ){if(!â.StartsWith("pad."))continue;string ė=â.Substring(4);Vector3D ð,Ĝ,ĝ
+,Ğ;if(Ĕ(Ł.Get(â,"pos").ToString(),out ð)&Ĕ(Ł.Get(â,"fwd").ToString(),out Ĝ)&Ĕ(Ł.Get(â,"up").ToString(),out ĝ)&Ĕ(Ł.Get(â,
+"connFwd").ToString(),out Ğ)){var Ą=new l{y=ė,Æ=ð,Ç=Ĝ,È=ĝ,É=Ğ};Ė(Ł.Get(â,"path").ToString(),Ą.Ê);m[ė]=Ą;}}}int é(string â,int Ŋ){
+int ò;return int.TryParse(â,out ò)?ò:Ŋ;}long å(string â,long Ŋ){long ò;return long.TryParse(â,out ò)?ò:Ŋ;}double ê(string â
+,double Ŋ){double ò;return double.TryParse(â,out ò)?ò:Ŋ;}string ď(Vector3D ē){return ē.X.ToString("R")+":"+ē.Y.ToString(
+"R")+":"+ē.Z.ToString("R");}bool Ĕ(string â,out Vector3D ē){ē=Vector3D.Zero;if(string.IsNullOrEmpty(â))return false;var ð=â
+.Split(':');if(ð.Length!=3)return false;double ŋ,Ō,ō;if(!double.TryParse(ð[0],out ŋ)||!double.TryParse(ð[1],out Ō)||!
+double.TryParse(ð[2],out ō))return false;ē=new Vector3D(ŋ,Ō,ō);return true;}

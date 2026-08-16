@@ -4,7 +4,80 @@ All notable changes to **SkippyFlight** are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.14.0] - 2026-08-16
+## [Unreleased]
+
+**Build tooling — migrated to MDK2.** No functional change to either script, so no version bump
+(ship stays 0.14.0, tower 0.13.0); the deployed logic is identical, just compiled and minified by a
+real toolchain instead of the old comment-stripper. Both scripts are now proper C# projects
+(`SkippyFlight/`, `SkippyTower/`, tied together by `SkippyFleet.sln`) built with
+[MDK2](https://github.com/malforge/mdk2) — `Mal.Mdk2.PbPackager` (pack + minify), `Mal.Mdk2.PbAnalyzers`
+(Roslyn PB-whitelist analyzer), and `Mal.Mdk2.References` (SE API reference assemblies).
+
+### Changed
+- **Build/deploy is now `dotnet build -c Release`** on `SkippyFleet.sln` (or a single project). Each build
+  compiles against the real Space Engineers PB API — the analyzer flags any non-whitelisted call, and
+  Roslyn catches type errors the old brace-only gate could not — then packs the script straight into the
+  game's local `IngameScripts\local\<name>` folder (no more copy-paste) and copies the packed result back
+  into the repo as the committed `*.min.cs` artifact.
+- **Minifier upgraded to full minification** (`minify=full` in each project's `mdk.ini`): strips *all*
+  whitespace and renames identifiers (using Unicode letters for a large short-name pool — the "odd
+  characters" seen in scripts like PAM). Verified that renaming touches identifiers only — **zero**
+  non-ASCII characters land inside any string/char literal, so every `CMD|…` wire token, Custom Data key,
+  and screen glyph survives verbatim. Output is deterministic (identical across rebuilds).
+- **Char budget reclaimed:** `SkippyFlight.min.cs` **99,673 → 49,208 chars** (327 → **50,792** headroom);
+  `SkippyTower.min.cs` **24,845 → 14,305 chars** (**85,695** headroom). The 100k paste limit is no longer a
+  practical constraint.
+- The heavily-commented source of truth now lives in each project's `Program.cs` (the old root
+  `SkippyFlight.cs` / `SkippyTower.cs` flat-body files are removed — their content is byte-identical inside
+  the project, wrapped in `partial class Program : MyGridProgram`). MDK2 strips comments at pack time, so
+  documentation stays free.
+
+### Removed
+- Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
+  `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
+
+## [0.15.0] - 2026-08-16
+
+### Added
+- **Build version now shows in-world.** The full status header reads `Skippy v0.15.0 Idle [STOP]`, so
+  you can confirm at a glance which build a programmable block is running (useful after a reload or an
+  accidental overwrite). Previously `VERSION` was declared but never referenced, so the minifier stripped
+  it and there was no way to tell builds apart from inside the game.
+
+## [0.14.2] - 2026-08-16
+
+### Fixed
+- **Mode readout showed `A`/`B`/`C` instead of `Continuous`/`OneTrip`/`OneWay`.** The full minifier
+  renames enum members, so any `enum.ToString()` (or enum-in-string concatenation) emitted the renamed
+  letter rather than the name. String *literals* survive minification, so all name-producing sites now
+  route through literal maps (`ModeName`, `TrigName`): the main menu, the `MODE`/`START` status lines,
+  and the mode-cycle echo again read the real mode name.
+- **Departure-trigger config could silently reset to `Auto`.** `homeTrigger`/`destTrigger` were persisted
+  to Custom Data via `enum.ToString()`, writing a minified letter that `TrigFromString` (a literal switch)
+  couldn't parse back — so a saved `Cargo`/`Timer`/`Manual` trigger reverted to `Auto` on the next config
+  load, and the Depart menu showed the letter. Both now persist and display through `TrigName`.
+- **Phase resume is now minifier-proof across rebuilds.** `[state] phase` is persisted as its integer
+  value instead of the enum name (which was an unstable renamed letter), with range validation on load;
+  an out-of-range or legacy value falls back to `Idle`. Resume-after-recompile within a build was already
+  working, but a name written by one build was not guaranteed to read back correctly under a different one.
+
+## [0.14.1] - 2026-08-16
+
+Ship-only bug fix: **removes the low-speed thrust jitter felt while landing/holding in gravity.**
+
+### Fixed
+- **Gravity dock/hold jitter.** The docking and station-keep controllers (`FlyToPose`, `StationKeep`)
+  drove thrust with `(desiredVel − vel)·mass·VEL_GAIN − grav·mass` but — unlike the cruise coast, which
+  the code even calls *"the identical law to FlyToPose"* — never applied the `VEL_DEADBAND` guard. So
+  near a dock, where `desiredVel → 0` and only residual velocity noise remains, a sub-threshold error
+  flipped the *net* thrust sign every 60 Hz frame (up-thruster bank vs down-thruster bank), which is the
+  jitter felt on a gravity landing. Both controllers now zero the velocity-correction term below
+  `VEL_DEADBAND` (0.4 m/s) while always keeping the `−grav·mass` hover term, so the ship rides through the
+  noise on hover alone. Position still self-corrects: `desiredVel` grows with distance, so any real drift
+  pushes the error back past the band and thrust resumes. No new tuning knobs; reuses the existing cruise
+  constant. Space docking is unaffected (the term was already near-zero there).
+
+
 
 Ship-only. Restores the **TELEM instrument screen** (removed in Slice i for char budget) and, on it,
 adds a **speed-derate breakdown** so a "why won't it reach `cruiseSpeed`?" question is answerable

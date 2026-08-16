@@ -14,7 +14,7 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 
 - **Flight-only, tower-optional.** Paste this script into the ship PB — it flies the whole route on
   its own. For a status board or an active traffic-control tower, run the companion
-  [`SkippyTower.cs`](SkippyTower.cs) on a station PB (`towerMode = board` renders the fleet board — a
+  [`SkippyTower`](SkippyTower.min.cs) on a station PB (`towerMode = board` renders the fleet board — a
   drop-in for the old `role = base`; `towerMode = control` serializes arrivals). SkippyTower also has a
   ship-side **teach mode** for recording holding zones and interior pad paths (see below).
 - **Teach a route by flying it.** Dock, `RECORD HOME`, fly the route by hand, dock, `RECORD DEST`.
@@ -46,15 +46,14 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 2. Edit the Custom Data (see below), then recompile again.
 3. For a fleet status board or an active control tower, paste
    [`SkippyTower.min.cs`](SkippyTower.min.cs) into a station PB and set `towerMode = board` (passive
-   board) or `control` (active tower). See [Control tower](#control-tower-skippytowercs).
+   board) or `control` (active tower). See [Control tower](#control-tower-skippytower).
 
-> **Paste the `.min.cs`, not the `.cs`.** The fully commented source
-> [`SkippyFlight.cs`](SkippyFlight.cs) is well over the 100,000-char PB limit, so it won't compile
-> in-game as-is. `python tools/build-min.py` generates
-> [`SkippyFlight.min.cs`](SkippyFlight.min.cs): the same code with comments and blank lines
-> stripped (~47 % smaller → **97,824 chars**, ~2 k under the cap). Keep editing
-> `SkippyFlight.cs`; the min file is a generated artifact, rebuilt on every change. (In-game
-> compile errors then report line numbers against the min file, not the source.)
+> **Paste the `.min.cs`, not the source.** The readable source lives in
+> [`SkippyFlight/Program.cs`](SkippyFlight/Program.cs) (fully commented); with comments and formatting
+> it's well over the 100,000-char PB limit, so it won't compile in-game as-is.
+> [`SkippyFlight.min.cs`](SkippyFlight.min.cs) is the paste-ready deploy artifact — the same code
+> minified to **49,208 chars** (~51 k under the cap). Keep editing `Program.cs`; the min file is
+> generated. See [Building](#building) below.
 
 ## Custom Data (`[sf]` section)
 
@@ -115,8 +114,14 @@ The script finds its cargo sorters by tag, not by exact name. Any conveyor sorte
 on while unloading. Matching is case-insensitive and the tag can appear anywhere in the name,
 so `[SF:LOAD] Bottom Feeder` and `Ore intake [sf:load]` are both picked up. You can
 tag several sorters for the same role. Set both tags to whatever suits your fleet (e.g.
-`[SKIPPY:LOAD]`). The script only toggles the sorters on and off — your filters and Drain-All
-settings are left untouched.
+`[SKIPPY:LOAD]`). The script only toggles the sorters on and off — it never changes their
+filters, direction, or Drain-All state.
+
+> **Each tagged sorter must have _Drain All_ enabled, sit on the ship grid, and point the
+> right way** (load pulls base→ship, unload pushes ship→base). The script enabling a sorter
+> only gates *when* it runs; a sorter without Drain All just filters passive flow, so between
+> two idle holds nothing actually moves. Sorters mounted on the station are ignored (only the
+> shuttle's own grid is scanned). Don't give one sorter both tags — it'll never sit idle.
 
 ## Teaching a route
 
@@ -295,7 +300,7 @@ skips the hydrogen check; one with no batteries skips the charge check.
 
 ## Fleet status board
 
-A status board is no longer part of the ship script — run [`SkippyTower.cs`](SkippyTower.cs) on a
+A status board is no longer part of the ship script — run [`SkippyTower`](SkippyTower.min.cs) on a
 station PB in **`towerMode = board`** for a passive board (a byte-for-byte drop-in for the old
 `role = base`), or `towerMode = control` for an active tower that also renders the board. Tag the
 station's LCDs with `[SF]` (or your `lcdTag`). The board shows each shuttle's state, ETA, distance,
@@ -306,9 +311,9 @@ range). See [Control tower](#control-tower-skippytowercs) below.
 > while the shuttle is out of range. Place a relay antenna near the midpoint for an unbroken
 > board — the shuttle still flies fine without signal; only the board blanks while out of range.
 
-## Control tower (`SkippyTower.cs`)
+## Control tower (`SkippyTower`)
 
-For a station with more than one shuttle, `SkippyTower.cs` is a **separate** script that actively
+For a station with more than one shuttle, `SkippyTower` is a **separate** script that actively
 serializes traffic so only one craft maneuvers at the station at a time — no more two shuttles both
 undocking into, or both taxiing onto, the same corridor. It renders the fleet status board and, in
 control mode, clears traffic on top. The **same script** also has a ship-side **teach mode** for
@@ -515,3 +520,33 @@ single-pose docking) above. You only need teach mode for stations you don't own.
   no hydrogen tanks or no batteries skips that half of the check entirely.
 - This is an in-game PB script; it cannot be unit-tested outside Space Engineers. Validation
   is in-world (see [roadmap.md](roadmap.md)).
+
+## Building
+
+The scripts are built with the [MDK2](https://github.com/malforge/mdk2) toolchain — you only need
+this if you're changing the code; to *use* the scripts just paste the committed `.min.cs` files.
+
+**Prerequisites:** the .NET SDK (9.0+), Space Engineers installed (MDK2 references the game's assemblies),
+and the MDK2 templates (`dotnet new install Mal.Mdk2.ScriptTemplates`). On first checkout, copy
+`mdk.local.ini.example`-style settings into each project's `mdk.local.ini` (git-ignored) pointing
+`binarypath` and `output` at your machine — `auto` works for both if SE is installed in the default
+location.
+
+**Build both scripts:**
+
+```
+dotnet build SkippyFleet.sln -c Release
+```
+
+For each project this: (1) compiles with Roslyn and the `Mal.Mdk2.PbAnalyzers` PB-whitelist analyzer —
+a real compile check, not just a brace count; (2) packs with **full minification** (whitespace stripped,
+identifiers renamed to short Unicode names) straight into the game's local script folder
+(`%AppData%\SpaceEngineers\IngameScripts\local\<name>\script.cs`) so it's instantly available in-game;
+and (3) copies that packed output back into the repo as `SkippyFlight.min.cs` / `SkippyTower.min.cs` —
+the committed, diffable deploy artifact.
+
+**Editing:** the readable source of truth is [`SkippyFlight/Program.cs`](SkippyFlight/Program.cs) and
+[`SkippyTower/Program.cs`](SkippyTower/Program.cs). Keep comments and formatting — the minifier removes
+them at pack time, so documentation is free. The `.min.cs` files are generated; never hand-edit them.
+The minifier renames identifiers but never touches string literals, so wire tokens (`CMD|…`), Custom
+Data keys, and screen text survive verbatim.

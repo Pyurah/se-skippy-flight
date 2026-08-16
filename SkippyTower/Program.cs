@@ -1,3 +1,27 @@
+using Sandbox.Game.EntityComponents;
+using Sandbox.ModAPI.Ingame;
+using Sandbox.ModAPI.Interfaces;
+using SpaceEngineers.Game.ModAPI.Ingame;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Linq;
+using System.Text;
+using VRage;
+using VRage.Collections;
+using VRage.Game;
+using VRage.Game.Components;
+using VRage.Game.GUI.TextPanel;
+using VRage.Game.ModAPI.Ingame;
+using VRage.Game.ModAPI.Ingame.Utilities;
+using VRage.Game.ObjectBuilders.Definitions;
+using VRageMath;
+
+namespace IngameScript
+{
+    public partial class Program : MyGridProgram
+    {
 /*//////////////////////////////////////////////////////////////////////////////
  * SkippyTower - Active traffic-control tower for the SkippyFlight shuttle fleet.
  * A separate Programmable Block script (its OWN char budget) that a station PB runs
@@ -1075,4 +1099,7 @@ bool TryVec(string s, out Vector3D v)
     if (!double.TryParse(p[0], out x) || !double.TryParse(p[1], out y) || !double.TryParse(p[2], out z)) return false;
     v = new Vector3D(x, y, z);
     return true;
+}
+
+    }
 }

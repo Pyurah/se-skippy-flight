@@ -6,3 +6,10 @@ Desktop.ini
 *~
 .vs/
 .vscode/
+
+# MDK2 / .NET build artifacts
+bin/
+obj/
+
+# MDK2 machine-local config (binary path + output dir); each dev keeps their own
+mdk.local.ini
