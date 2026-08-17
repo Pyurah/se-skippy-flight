@@ -64,9 +64,9 @@ namespace IngameScript
  * thrusters do the climbing, else nose-to-path; forced with cruiseAttitude in Custom
  * Data (auto|level|nose). On final approach it raycasts the docking corridor with a
  * camera and HOLDS off if another grid is parked on / crossing the connector (anti-
- * collision), auto-resuming when clear; see DockCorridorBlocked. Sorters are
- * only toggled on/off (filters/Drain-All untouched); tag match is case-insensitive
- * anywhere in the name.
+ * collision), auto-resuming when clear; see DockCorridorBlocked. Conveyor/sorter
+ * logistics are entirely operator-owned: the script never enables, disables, or moves
+ * items through any block - it only watches cargo fill to time loading/unloading.
  *
  * PAD BANK + HOLDING ZONES (with a SkippyTower running control): the tower can own a
  * pool of pads and a holding zone, and assign a free pad to each arriving ship, so ships
@@ -90,7 +90,7 @@ namespace IngameScript
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.15.3";
+const string VERSION = "0.16.0";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
@@ -106,7 +106,7 @@ enum RunMode { Continuous, OneTrip, OneWay }
 //   Auto   - leave as soon as the cargo op finishes (loaded at home / emptied at the
 //            dest, with the drain safety timeout) - the original behaviour.
 //   Cargo  - wait for the hold to be full at home / empty at the destination.
-//   Timer  - run the sorters for dwellSec, then leave regardless of fill.
+//   Timer  - dwell at the dock for dwellSec, then leave regardless of fill.
 //   Manual - hold until a DEPART command arrives (ship button or station over IGC).
 // Departure is additionally gated on fuel/charge (see DepartFuelOk): the shuttle
 // won't leave a dock without enough hydrogen and battery to reach the next one.
@@ -135,7 +135,7 @@ enum PhaseId
 {
     Idle,          // parked, waiting for a command / next cycle
     Recording,     // teaching a route (path breadcrumbs are being captured)
-    Loading,       // at home, load sorter on, filling to threshold (always outbound)
+    Loading,       // at home, waiting for the hold to fill to threshold (always outbound)
     Undock,        // released the current connector, backing off to the inner stand-off
     DepartStaging, // flown out to the departure staging fix; rotates to the route heading there
     Cruise,        // controller flying the (possibly reversed) recorded path
@@ -144,7 +144,7 @@ enum PhaseId
     Holding,       // station-keeping at the arrival holding fix; reorients to the dock attitude
     Taxi,          // the cleared final move: from the holding fix down the connector axis
     Approach,      // legacy alias for Holding (kept so an in-flight ship resumes across the swap)
-    Unloading,     // at destination, unload sorter on, draining (always inbound)
+    Unloading,     // at destination, waiting for the hold to drain (always inbound)
     Faulted        // something went wrong; needs operator attention
     // The anti-dive guarantee (roadmap Slice b): every dock is bracketed by a staging
     // fix on departure (DepartStaging) and a holding fix on arrival (Holding); Taxi is
@@ -226,6 +226,7 @@ class UndockPhase : FlightPhase
     public override PhaseId Id { get { return PhaseId.Undock; } }
     public override bool IsFlightControl { get { return true; } }
     public override string Label { get { return "Undock"; } }
+    public override void Enter(Program p) { p.phaseTimer = 0; }   // start the anti-lurch spin-up dwell from zero (phaseTimer carries over from Loading otherwise)
     public override void Tick(Program p) { p.TickUndock(); }
 }
 
@@ -327,8 +328,6 @@ string shipName = "Skippy";
 string channel = "SkippyShuttleNet";
 bool useTower = false;        // opt-in tower clearance; Off (default) = fly independently, byte-identical to pre-tower behavior
 string remoteName = "";
-string loadTag = "[SF:LOAD]";
-string unloadTag = "[SF:UNLOAD]";
 string lcdTag = "[SF]";
 float cruiseSpeed = 100f;
 float climbSpeed = 100f;          // [m/s] top-speed cap while Climbing; clamped to (5, cruiseSpeed]. Default = cruiseSpeed (no-op) - lower it for a gentler climb.
@@ -463,8 +462,6 @@ Vector3D lastDir = Vector3D.Zero;
 // ---- Blocks ----------------------------------------------------------------
 IMyRemoteControl rc;
 List<IMyShipConnector> connectors = new List<IMyShipConnector>();
-List<IMyConveyorSorter> loadSorters = new List<IMyConveyorSorter>();
-List<IMyConveyorSorter> unloadSorters = new List<IMyConveyorSorter>();
 List<IMyCargoContainer> cargo = new List<IMyCargoContainer>();
 // A ship screen and the view it renders. FixedSize <= 0 = auto-fit to this surface;
 // > 0 pins that font size (for operators who don't want auto-resize). Pad is the
@@ -483,6 +480,8 @@ const double DT_FALLBACK = 1.0 / 6.0;   // seconds/tick fallback (first tick / l
 double dt = DT_FALLBACK;                 // real elapsed time this tick; timers use this, not a fixed rate
 double sinceRender = 0;                  // s since the last LCD render + broadcast (throttle at 60 Hz)
 const double APPROACH_TIMEOUT = 45;   // s to abort a stuck docking approach
+const double UNDOCK_SPINUP_TIMEOUT = 2.5; // s max to establish hover thrust on the still-latched connector before releasing anyway (guards a genuinely under-thrust ship from hanging on the dock)
+const double UNDOCK_LIFT_READY = 0.95;    // fraction of ship weight the gravity-opposing thrusters must actually be producing before we release the connector (anti-lurch: no free-fall gap at undock)
 const int MAX_PATH = 250;
 const int WRAP_COLS = 26;             // ship LCD word-wrap width; keeps any one line from blowing out a screen's auto-fit font
 
@@ -672,14 +671,12 @@ void SwitchPhase(PhaseId next)
     if (next == PhaseId.Undock) { interior = false; interiorDone = false; haveLoiter = false; zoneWait = 0; }
 }
 
-// The Faulted phase's behavior: stop driving, drop control, kill the sorters. Was an
+// The Faulted phase's behavior: stop driving, drop control. Was an
 // inline case in Main's switch; now a body FaultedPhase dispatches to.
 void TickFaulted()
 {
     AbortAutopilot();
     ReleaseControl();
-    SetSorters(loadSorters, false);
-    SetSorters(unloadSorters, false);
 }
 
 // Map the direction-free (phase, Outbound) back to the pre-0.2.0 State name. Kept
@@ -790,8 +787,6 @@ void HandleCommand(string arg)
             departRequested = false;
             AbortAutopilot();
             ReleaseControl();
-            SetSorters(loadSorters, false);
-            SetSorters(unloadSorters, false);
             SwitchPhase(PhaseId.Idle);
             statusMsg = "Stopped";
             break;
@@ -1062,7 +1057,11 @@ void TickIdle()
     if (DockedNow())
     {
         // Parked at an unrelated connector - hold rather than beeline to a recorded dock.
-        if (!AtRouteEnd()) { statusMsg = "Idle: docked away from route - undock or move to home/dest"; return; }
+        if (!AtRouteEnd())
+        {
+            statusMsg = "Idle: docked away from route - undock or move to home/dest";
+            return;
+        }
         SwitchPhase(AtHomeEnd() ? PhaseId.Loading : PhaseId.Unloading);
     }
     else { leg.Outbound = false; SwitchPhase(PhaseId.Cruise); }
@@ -1070,28 +1069,24 @@ void TickIdle()
 
 void TickLoading()
 {
-    SetSorters(unloadSorters, false);
     phaseTimer += dt;
     double mass = ShipMassKg();
     double fill = CargoFillPct();
 
+    // The script does not drive conveyors/sorters - the operator's own logistics (event
+    // controllers, drain-all, timers) load the hold. We only watch how full it is and leave
+    // once the departure trigger is satisfied (full, mass gate, timer, cargo, or manual).
     bool massGate = maxMassKg > 0 && mass >= maxMassKg * 0.98;
     bool cargoReady = fill >= departFill || massGate;
-
-    // Keep loading until the hold is full (or the mass gate trips); then stop the
-    // sorters even while we're still waiting on a Manual/Timer trigger, so a shuttle
-    // that dwells or waits for a button never keeps cramming past full/overweight.
-    SetSorters(loadSorters, !cargoReady);
 
     if (DepartureAllowed(true, cargoReady))
     {
         string why;
-        if (!DepartFuelOk(true, out why)) { SetSorters(loadSorters, false); statusMsg = why; return; }
+        if (!DepartFuelOk(true, out why)) { statusMsg = why; return; }
         // Tower gate: stay docked (out of the corridor) until cleared. A manual/remote
         // DEPART (departRequested) is an explicit override and bypasses the tower.
         if (!departRequested && !ClearedToProceed("DEPART", homeConn))
-        { SetSorters(loadSorters, false); statusMsg = TowerWait("DEPART"); return; }
-        SetSorters(loadSorters, false);
+        { statusMsg = TowerWait("DEPART"); return; }
         departRequested = false;
         BeginLegMeasure(true);
         statusMsg = "Loaded (" + fill.ToString("0") + "%, " + (mass / 1000.0).ToString("0.0") + "t) - departing";
@@ -1105,29 +1100,31 @@ void TickLoading()
 
 void TickUnloading()
 {
-    SetSorters(loadSorters, false);
     phaseTimer += dt;
     double fill = CargoFillPct();
 
-    // Auto keeps its original drain-timeout safety net; the explicit Cargo trigger
-    // waits for a truly empty hold. Both stop the sorters once empty.
+    // The script does not drive conveyors/sorters - the operator's own logistics empty the hold.
+    // We only watch the fill: the hold is "empty" at <=1%.
     bool cargoReady = fill <= 1.0;
-    SetSorters(unloadSorters, !cargoReady);
+
+    // OneWay: the destination is the end of the line. Once the hold is empty the delivery is
+    // done - complete and hold HERE, regardless of the depart trigger. Manual/Timer/Cargo decide
+    // when to LEAVE for another dock, but a one-way shuttle isn't going anywhere, so gating this
+    // on the trigger left a OneWay + Manual/Timer dest stuck forever "waiting DEPART" after it had
+    // already unloaded. A manual DEPART still force-completes early.
+    if (runMode == RunMode.OneWay)
+    {
+        if (!cargoReady && !departRequested) { statusMsg = DepartStatus(false, fill); return; }
+        departRequested = false;
+        phaseTimer = 0;
+        operating = false;
+        SwitchPhase(PhaseId.Idle);
+        statusMsg = "Delivered - holding at destination";
+        return;
+    }
 
     if (DepartureAllowed(false, cargoReady))
     {
-        SetSorters(unloadSorters, false);
-
-        if (runMode == RunMode.OneWay)   // delivered - hold at the destination, don't return
-        {
-            departRequested = false;
-            phaseTimer = 0;
-            operating = false;
-            SwitchPhase(PhaseId.Idle);
-            statusMsg = "Delivered - holding at destination";
-            return;
-        }
-
         // Round trip: don't leave for home without the fuel to get there.
         string why;
         if (!DepartFuelOk(false, out why)) { statusMsg = why; return; }
@@ -1181,6 +1178,24 @@ void TickUndock()
 
     if (c != null && c.Status == MyShipConnectorStatus.Connected)
     {
+        // Anti-lurch spin-up. Releasing in gravity with cold thrusters drops the ship until
+        // thrust ramps in - a visible lurch toward the ground (worse if an external event
+        // controller only powers the thrusters up REACTIVELY on the disconnect event). So while
+        // the connector still holds us (ship can't move; station power flows through the latch),
+        // bring the drives online, put batteries on Auto so ship power is ready at the handoff,
+        // command a pure hover, and only release once the gravity-opposing thrusters are actually
+        // carrying the ship's weight. At the instant of release lift is already flowing -> no gap.
+        Vector3D grav = rc.GetNaturalGravity();
+        if (grav.LengthSquared() > GRAV_EPS * GRAV_EPS)
+        {
+            ArmThrust();
+            double mass = rc.CalculateShipMass().PhysicalMass;
+            ApplyForce(-grav * mass);   // hover against the still-latched connector
+            phaseTimer += dt;
+            statusMsg = "Spinning up thrust";
+            if (!LiftEstablished(grav, mass) && phaseTimer < UNDOCK_SPINUP_TIMEOUT)
+                return;                 // stay latched until the drives hold our weight (or time out)
+        }
         c.Disconnect();
         phaseTimer = 0;
         statusMsg = "Undocking";
@@ -2280,6 +2295,35 @@ void ZeroThrusters()
     foreach (var t in thrusters) if (t != null) t.ThrustOverride = 0f;
 }
 
+// Bring the drives online for flight: enable every thruster (an external event controller
+// may have powered them down while docked) and put batteries on Auto so the ship's own power
+// is ready the instant the connector releases. Used by the anti-lurch undock spin-up; idempotent.
+void ArmThrust()
+{
+    foreach (var t in thrusters) if (t != null && !t.Enabled) t.Enabled = true;
+    foreach (var b in batteries) if (b != null) b.ChargeMode = ChargeMode.Auto;
+}
+
+// True once the thrusters that oppose gravity are actually producing at least UNDOCK_LIFT_READY
+// of the ship's weight - i.e. lift is established and it's safe to release the connector without
+// a free-fall gap. Sums each working thruster's CURRENT thrust projected onto the up axis (a
+// thruster pushes the ship along its own Backward), so it measures real ramped-in thrust, not
+// just capacity. In negligible gravity there's nothing to fall into, so it's trivially ready.
+bool LiftEstablished(Vector3D grav, double mass)
+{
+    double g = grav.Length();
+    if (g < GRAV_EPS) return true;
+    Vector3D up = -grav / g;
+    double lift = 0;
+    foreach (var t in thrusters)
+    {
+        if (t == null || !t.IsWorking) continue;
+        double comp = t.WorldMatrix.Backward.Dot(up);   // >0 when this thruster pushes the ship up
+        if (comp > 0) lift += t.CurrentThrust * comp;
+    }
+    return lift >= mass * g * UNDOCK_LIFT_READY;
+}
+
 // The controller owns the dampeners while flying: OFF so coasting in space costs no
 // fuel and there's no automatic braking to fight; restored ON when control is released.
 // But it only re-asserts dampeners it actually turned off (dampenersOwned) - so a parked
@@ -2421,18 +2465,6 @@ void Discover()
     foreach (var t in tanks)
         if (t.BlockDefinition.SubtypeName.IndexOf("Hydrogen", StringComparison.OrdinalIgnoreCase) >= 0)
             h2Tanks.Add(t);
-
-    // Sorters are found by tag: any conveyor sorter whose name contains the
-    // load/unload tag (case-insensitive). Name them anything - only the tag
-    // has to appear somewhere in the name. Multiple per role is fine.
-    var sorters = new List<IMyConveyorSorter>();
-    GridTerminalSystem.GetBlocksOfType(sorters, b => b.CubeGrid == grid);
-    loadSorters.Clear(); unloadSorters.Clear();
-    foreach (var s in sorters)
-    {
-        if (HasTag(s.CustomName, loadTag)) loadSorters.Add(s);
-        if (HasTag(s.CustomName, unloadTag)) unloadSorters.Add(s);
-    }
 
     // Status surfaces. Two ways a screen picks its view:
     //   1. A tagged text panel: name contains lcdTag, optionally with a view/size,
@@ -2597,12 +2629,6 @@ bool AtRouteEnd()
     double tol = DOCK_MATCH_DIST * DOCK_MATCH_DIST;
     return Vector3D.DistanceSquared(p, homePose.Pos) <= tol
         || Vector3D.DistanceSquared(p, destPose.Pos) <= tol;
-}
-
-void SetSorters(List<IMyConveyorSorter> list, bool on)
-{
-    foreach (var s in list)
-        if (s != null && s.Enabled != on) s.Enabled = on;
 }
 
 // Case-insensitive "does this block name contain the tag" test.
@@ -3427,8 +3453,6 @@ void WriteShuttleSection(MyIni ini)
     ini.Set("sf", "homeTrigger", TrigName(homeTrigger));
     ini.Set("sf", "destTrigger", TrigName(destTrigger));
     ini.Set("sf", "remoteName", remoteName);
-    ini.Set("sf", "loadTag", loadTag);
-    ini.Set("sf", "unloadTag", unloadTag);
     ini.Set("sf", "lcdTag", lcdTag);
     ini.Set("sf", "cruiseSpeed", cruiseSpeed);
     ini.Set("sf", "climbSpeed", climbSpeed);
@@ -3475,10 +3499,6 @@ void LoadConfig()
     homeTrigger = TrigFromString(ini.Get("sf", "homeTrigger").ToString(defHome));
     destTrigger = TrigFromString(ini.Get("sf", "destTrigger").ToString("Auto"));
     remoteName = ini.Get("sf", "remoteName").ToString("");
-    // Sorter tags; fall back to the legacy exact-name keys (a full name still
-    // matches as a substring tag), else the defaults.
-    loadTag = ini.Get("sf", "loadTag").ToString(ini.Get("sf", "loadSorter").ToString(loadTag));
-    unloadTag = ini.Get("sf", "unloadTag").ToString(ini.Get("sf", "unloadSorter").ToString(unloadTag));
     lcdTag = ini.Get("sf", "lcdTag").ToString(lcdTag);
     cruiseSpeed = (float)ini.Get("sf", "cruiseSpeed").ToDouble(cruiseSpeed);
     // Climb/Descent governors: clamped to (5, cruiseSpeed] so a lower cap is always braking-safe

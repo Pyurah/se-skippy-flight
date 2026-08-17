@@ -7,7 +7,15 @@ faithful copy of that script and is refactored onto a phase-object architecture.
 
 ## Current status
 
-- **Version:** ship 0.14.0 / tower 0.13.0 (ship 0.14.0 — **TELEM instrument screen restored** with a
+- **Recent (0.15.x → 0.16.0):** in-world version header (0.15.0); connector powered on before the
+  dock latch (0.15.2); hold-gated velocity deadband kills residual taxi jitter (0.15.3); anti-lurch
+  undock spin-up while still latched in gravity (0.15.4); OneWay delivery completes on an empty hold
+  regardless of depart trigger (0.15.5). **0.16.0 removes all conveyor/sorter control** — cargo
+  logistics are now entirely operator-owned; Loading/Unloading are pure fill-observation phases. The
+  script never enables, disables, or moves items through any block, which ended the unload-stall and
+  the "script keeps switching my conveyors off" problems. Scripted logistics may return later as an
+  opt-in "Skippy Logistics" feature.
+- **Version:** ship 0.16.0 / tower 0.13.0 (ship 0.14.0 — **TELEM instrument screen restored** with a
   new speed-derate breakdown line, which surfaced and fixed a cruise **heading-align derate** that
   capped straight-leg speed ~10% below `cruiseSpeed`; see the note after the Slice i summary. Slice i delivered — **tower-relayed pad paths + holding
   zones**, and a **script split**: setup tooling moved out of SkippyFlight into a new SkippyTower **teach

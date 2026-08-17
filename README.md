@@ -30,8 +30,9 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
   it runs at **60 Hz** so the heading stays rock-steady (a slow loop overshoots and wobbles),
   and it **coasts in space** — dampeners off, thrust cut once up to speed — so a straight cruise
   leg burns effectively **no fuel**.
-- **Cargo-aware.** Toggles your load/unload sorters and enforces a mass gate so the ship
-  never departs overweight.
+- **Cargo-aware.** Watches cargo fill and enforces a mass gate so the ship departs when the
+  hold is full (or empty at the destination) and never leaves overweight. It reads the cargo —
+  it does not move it: conveyors, sorters, and drain-all stay entirely under your control.
 - **Live status + ETA.** Ship LCDs show state/ETA; the shuttle broadcasts its status so a
   `SkippyTower` board (or control tower) can render the whole fleet.
   Split the display across cockpit screens — menu on one, trip info on another, a compact
@@ -65,13 +66,11 @@ being built out slice by slice — see [roadmap.md](roadmap.md).
 | `runMode` | `CONTINUOUS` | Trip cycle: `CONTINUOUS`, `ONETRIP`, or `ONEWAY` (departure is a *separate* setting — see below) |
 | `homeTrigger` | `Auto` | What releases the shuttle **from home**: `Auto`, `Cargo`, `Timer`, `Manual` |
 | `destTrigger` | `Auto` | What releases the shuttle **from the destination** (same four options) |
-| `dwellSec` | `30` | `Timer` trigger: seconds to run the sorters before departing regardless of fill |
+| `dwellSec` | `30` | `Timer` trigger: seconds to dwell at the dock before departing regardless of fill |
 | `minHydrogenPct` | `10` | Hard floor — never depart below this hydrogen %. Ignored if the ship has no hydrogen tanks |
 | `minBatteryPct` | `10` | Hard floor — never depart below this battery charge %. Ignored if the ship has no batteries |
 | `fuelMarginPct` | `25` | Safety margin on the measured per-leg fuel/charge estimate |
 | `remoteName` | *(blank)* | Blank = auto-find a Remote Control on the grid |
-| `loadTag` | `[SF:LOAD]` | Sorters whose name **contains** this tag load cargo at home |
-| `unloadTag` | `[SF:UNLOAD]` | Sorters whose name **contains** this tag unload at the destination |
 | `lcdTag` | `[SF]` | LCDs whose name contains this tag show status |
 | `cruiseSpeed` | `100` | Cruise speed cap (m/s); the controller stays at or below this |
 | `climbSpeed` | `100` | Top-speed cap (m/s) while in the **Climb** stage of a leg that ascends out of gravity. Clamped to `(5, cruiseSpeed]`. Defaults to `cruiseSpeed`, so the climb governor does nothing until you lower it |
@@ -102,26 +101,25 @@ The recorded route lives in a separate `[route]` section that the script writes 
 > the cockpit screen-map section is `[sf-screens]`, and the default block tags are the `[SF]`
 > family. Your existing config migrates automatically on first recompile — every key is copied
 > from `[shuttle]` into `[sf]` and nothing is lost — and legacy `[shuttle-screens]` cockpit
-> sections are still read. Your existing `[SHUTTLE]`-named panels, sorters and cameras keep
+> sections are still read. Your existing `[SHUTTLE]`-named panels and cameras keep
 > working too, because the tags are stored *values* that survive the migration. To switch a
 > grid over to the new `[SF]` tags, edit the tag keys in `[sf]` (or clear Custom Data to
 > re-seed the `[SF]` defaults) and rename the blocks to match.
 
-### Tagging sorters
+### Cargo handling
 
-The script finds its cargo sorters by tag, not by exact name. Any conveyor sorter whose name
-**contains** `loadTag` is switched on while loading; any that contains `unloadTag` is switched
-on while unloading. Matching is case-insensitive and the tag can appear anywhere in the name,
-so `[SF:LOAD] Bottom Feeder` and `Ore intake [sf:load]` are both picked up. You can
-tag several sorters for the same role. Set both tags to whatever suits your fleet (e.g.
-`[SKIPPY:LOAD]`). The script only toggles the sorters on and off — it never changes their
-filters, direction, or Drain-All state.
+**Loading and unloading logistics are yours.** SkippyFlight does not enable, disable, or move
+items through any sorter, conveyor, or container — it only *watches* cargo fill to decide when
+the hold is full (depart from home) or empty (delivered / depart from the destination), and
+enforces the optional `maxMassKg` gate. Wire the actual movement however you like: an event
+controller that runs drain-all sorters on connector lock, timers, throw-out, filters — all of
+it stays under your control and the script never fights it.
 
-> **Each tagged sorter must have _Drain All_ enabled, sit on the ship grid, and point the
-> right way** (load pulls base→ship, unload pushes ship→base). The script enabling a sorter
-> only gates *when* it runs; a sorter without Drain All just filters passive flow, so between
-> two idle holds nothing actually moves. Sorters mounted on the station are ignored (only the
-> shuttle's own grid is scanned). Don't give one sorter both tags — it'll never sit idle.
+> Because the script only senses fill, make sure your setup actually fills the hold at home and
+> empties it at the destination within your chosen departure trigger. With the `Auto` trigger the
+> ship still leaves the destination after `unloadDrainSec` seconds as a safety net even if the
+> hold isn't fully empty; `Cargo` waits for a genuinely full/empty hold; `Timer` dwells for
+> `dwellSec`; `Manual` waits for a DEPART command.
 
 ## Teaching a route
 
@@ -175,7 +173,7 @@ nothing to configure). While climbing or descending inside a gravity well the st
 | `ROUTE [name]` | Switch the active route to a saved one (blocked while operating). No name = report the active route + saved count |
 | `DELROUTE <name>` | Delete a saved route; if it was active, fall back to another (or none) |
 | `START` / `GO` | Begin operating per the run mode |
-| `STOP` | Abort the flight, turn sorters off, return to Idle |
+| `STOP` | Abort the flight, return to Idle |
 | `HOME` | Fly back to the home connector and dock |
 | `DEPART` | Release the shuttle from the dock it's holding at **now** (overrides its trigger) |
 | `MODE CONTINUOUS\|ONETRIP\|ONEWAY` | Change the run mode live (`WAITFULL` still accepted — maps to Continuous + `homeTrigger=Cargo`) |
@@ -281,7 +279,7 @@ for a `DEPART` at home each time.
   destination, keeping the unload drain-timeout safety net).
 - **Cargo** — wait until the hold is genuinely full at home (`departFill`% / mass gate) or empty
   at the destination before leaving. This is what the old `WAITFULL` mode did.
-- **Timer** — run the sorters for `dwellSec`, then depart regardless of fill.
+- **Timer** — dwell at the dock for `dwellSec`, then depart regardless of fill.
 - **Manual** — hold at the dock until a `DEPART` arrives (the ship's *Depart Now* button, the
   `DEPART` run-arg, or a `DEPART` broadcast from the base). Nothing leaves on its own.
 

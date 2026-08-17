@@ -36,6 +36,45 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.16.0] - 2026-08-16
+
+### Removed
+- **All conveyor/sorter control.** The script no longer enables, disables, or moves items through
+  any sorter, conveyor, or container — cargo logistics are now entirely operator-owned (event
+  controllers, drain-all, throw-out, timers, filters). The `[SF:LOAD]` / `[SF:UNLOAD]` sorter tags,
+  the `loadTag` / `unloadTag` Custom Data keys, and the short-lived auto-drain safeguard are gone.
+  Loading and Unloading are now pure **observation** phases: the script watches cargo fill (and the
+  mass gate) to decide when the hold is full or empty and when the departure trigger is satisfied,
+  then flies — it never touches the machinery that does the moving.
+
+  *Why:* driving the sorters was the root of the recent unload-stall and the "can't turn my
+  conveyors on, the script keeps switching them off" problems — the script was fighting the
+  operator's own logistics. Removing it makes behavior predictable and reliable. Scripted logistics
+  may return later as a deliberate, opt-in "Skippy Logistics" feature.
+
+## [0.15.5] - 2026-08-16
+
+### Fixed
+- **OneWay delivery could hang in "Unloading … waiting DEPART".** The OneWay "delivered" completion
+  was gated behind `DepartureAllowed`, so a OneWay route with a **Manual** or **Timer** destination
+  trigger unloaded the hold but then waited forever for a depart signal that a one-way shuttle has no
+  use for (it isn't going anywhere). OneWay now completes as soon as the hold is empty — regardless of
+  the depart trigger — and holds at the destination (a manual DEPART still force-completes early).
+
+## [0.15.4] - 2026-08-16
+
+### Fixed
+- **Lurch toward the ground at undock in gravity.** `TickUndock` released the connector and
+  only produced lift on the *next* tick, so in a gravity well the ship free-fell during the gap
+  while the thrusters powered up and ramped in (worse when an external event controller powers
+  the drives up only reactively on the disconnect event). The ship now performs an anti-lurch
+  spin-up *while the connector is still latched*: it enables the thrusters, sets batteries to
+  Auto (ship power ready for the handoff), commands a pure hover, and releases only once the
+  gravity-opposing thrusters are actually carrying ≥95% of the ship's weight (or a 2.5 s
+  timeout). At release lift is already flowing, so there's no free-fall gap. Space undocks are
+  unchanged, and this cooperates with (and makes redundant) any event-controller thruster/battery
+  toggle on the lock/unlock event.
+
 ## [0.15.3] - 2026-08-16
 
 ### Fixed
