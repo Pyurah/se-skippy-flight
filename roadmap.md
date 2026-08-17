@@ -16,8 +16,10 @@ faithful copy of that script and is refactored onto a phase-object architecture.
   the "script keeps switching my conveyors off" problems. Scripted logistics may return later as an
   opt-in "Skippy Logistics" feature. **0.17.0 makes OneTrip complete where it began from either end**
   — a round trip started while docked at the destination now runs dest → home → dest instead of
-  flying one leg home and stopping.
-- **Version:** ship 0.17.0 / tower 0.13.0 (ship 0.14.0 — **TELEM instrument screen restored** with a
+  flying one leg home and stopping. **0.18.0 makes the ETA phase-aware** — it times each remaining
+  segment at the governor it will actually fly (climb/cruise/descent cap ∧ velocity-profile ceiling)
+  instead of dividing distance by instantaneous speed, so the countdown is steady and honest.
+- **Version:** ship 0.18.0 / tower 0.13.0 (ship 0.14.0 — **TELEM instrument screen restored** with a
   new speed-derate breakdown line, which surfaced and fixed a cruise **heading-align derate** that
   capped straight-leg speed ~10% below `cruiseSpeed`; see the note after the Slice i summary. Slice i delivered — **tower-relayed pad paths + holding
   zones**, and a **script split**: setup tooling moved out of SkippyFlight into a new SkippyTower **teach

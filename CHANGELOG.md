@@ -36,6 +36,23 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.18.0] - 2026-08-16
+
+### Changed
+- **ETA is now phase-aware.** The estimate previously divided remaining distance by the ship's
+  *instantaneous* speed, so it lurched while accelerating or heading-derated and pretended the whole
+  trip ran at whatever governor was active right then (a climb read pessimistically, then snapped
+  short at the cruise hand-off; the final decel was never modeled). It now walks the remaining
+  waypoints and times each segment at the **governor** it will fly there — `climbSpeed` /
+  `cruiseSpeed` / `descentSpeed` (or `dockSpeed` on a tower interior thread). The climb-out, level
+  cruise, and descent-into-dock segments are identified from the altitude trend along the path — the
+  same signal the phase machine switches on — so during a climb the countdown already credits the
+  faster cruise leg ahead instead of extrapolating the climb cap over the whole distance. Brief corner
+  slowdowns are ignored (the controller holds the governor through a segment and only sheds speed in
+  the last brake-length, so a corner's low speed is not the segment average); the one slowdown that
+  always happens — braking to a stop at the final stand-off — is added explicitly. The base-board
+  broadcast (`etaSec`) uses the same estimate.
+
 ## [0.17.0] - 2026-08-16
 
 ### Fixed
