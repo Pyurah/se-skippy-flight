@@ -36,6 +36,18 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.17.0] - 2026-08-16
+
+### Fixed
+- **OneTrip (round trip) now completes where it began, from either end.** Previously the round trip
+  was hardcoded as home → dest → home: starting a OneTrip while docked at the destination flew a
+  single leg home and stopped ("Trip complete") instead of loading and returning to the station. The
+  trip now remembers which end it started at (`tripStartHome`, persisted across recompile) and
+  completes only when it arrives back at that origin — so a trip started at the dest runs
+  dest → home → dest, and one started at home still runs home → dest → home. Loading/Unloading phase
+  direction was already absolute (tied to the home/dest poses), so only the OnDocked completion test
+  needed the origin awareness.
+
 ## [0.16.0] - 2026-08-16
 
 ### Removed

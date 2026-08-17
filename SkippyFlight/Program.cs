@@ -90,15 +90,16 @@ namespace IngameScript
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.16.0";
+const string VERSION = "0.17.0";
 
 // ---- States ----------------------------------------------------------------
-// RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip (home ->
-// dest -> home); OneWay runs a single leg to the OPPOSITE end and holds there, the
-// next START sending it back. Which way OneWay goes is decided by which END it's
-// physically parked at (pose proximity). The old WaitFull mode was folded into
-// Continuous + homeTrigger = Cargo (see DepartTrigger); a config that still says
-// WAITFULL loads as exactly that.
+// RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip that ENDS
+// WHERE IT BEGAN - starting docked at home runs home -> dest -> home, while starting
+// docked at the dest runs dest -> home -> dest. OneWay runs a single leg to the
+// OPPOSITE end and holds there, the next START sending it back. Which way OneWay goes
+// is decided by which END it's physically parked at (pose proximity). The old WaitFull
+// mode was folded into Continuous + homeTrigger = Cargo (see DepartTrigger); a config
+// that still says WAITFULL loads as exactly that.
 enum RunMode { Continuous, OneTrip, OneWay }
 
 // DepartTrigger is a SEPARATE, PER-CONNECTOR setting (PAM-style): what releases the
@@ -382,6 +383,7 @@ bool operating = false;          // set by START, cleared by STOP / OneTrip end
 string statusMsg = "Idle";
 double phaseTimer = 0;           // seconds spent in the current timed phase
 bool departRequested = false;    // manual "Depart Now" latch (ship button / station IGC); consumed on departure
+bool tripStartHome = true;       // OneTrip: which end the round trip began at; it completes when it returns there (home->dest->home OR dest->home->dest)
 
 // ---- Fuel / charge gate ----------------------------------------------------
 // Adaptive per-leg estimate: how much hydrogen and charge (in % points) the last
@@ -590,6 +592,7 @@ void Save()
     // enum members, so a name would be an unstable letter that can't survive a rebuild.
     ini.Set("state", "phase", (int)phase);
     ini.Set("state", "outbound", leg.Outbound);
+    ini.Set("state", "tripStartHome", tripStartHome);
     ini.Set("state", "operating", operating);
     ini.Set("state", "phaseTimer", phaseTimer);
     ini.Set("state", "estHydroOut", estHydroOut);
@@ -763,6 +766,11 @@ void HandleCommand(string arg)
                     break;
                 }
                 bool atHome = AtHomeEnd();
+                // A OneTrip round trip ends where it begins. Remember that origin so it can run
+                // either home->dest->home OR dest->home->dest. Origin is the dest only when we
+                // START docked at the dest end; every other start (docked home, or mid-air) keeps
+                // the legacy home-centric completion.
+                tripStartHome = !(docked && !atHome);
                 if (runMode == RunMode.OneWay)
                 {
                     if (docked && atHome) SwitchPhase(PhaseId.Loading);         // load, head to dest
@@ -2349,6 +2357,21 @@ void OnDocked()
 {
     bool atDest = leg.Outbound;
     FinishLegMeasure();   // learn what the leg just flown actually cost in fuel/charge
+
+    // OneTrip is a round trip that ENDS WHERE IT BEGAN. Complete when we return to the origin
+    // end after visiting the far one. Any OnDocked call is a real arrival after a flown leg (a
+    // docked START goes straight to Loading/Unloading, never through here), so reaching the origin
+    // means the loop is done. Tracking the origin lets a trip that STARTED at the destination run
+    // dest -> home -> dest, not only home -> dest -> home.
+    if (runMode == RunMode.OneTrip
+        && ((tripStartHome && !atDest) || (!tripStartHome && atDest)))
+    {
+        operating = false;
+        SwitchPhase(PhaseId.Idle);
+        statusMsg = "Trip complete";
+        return;
+    }
+
     if (atDest)
     {
         SwitchPhase(PhaseId.Unloading);
@@ -2356,10 +2379,9 @@ void OnDocked()
     }
     else
     {
-        // Home again. OneTrip and OneWay stop and hold here; Continuous loads and
-        // sets out again (subject to the home departure trigger).
-        if (runMode == RunMode.OneTrip) { operating = false; SwitchPhase(PhaseId.Idle); statusMsg = "Trip complete"; }
-        else if (runMode == RunMode.OneWay) { operating = false; SwitchPhase(PhaseId.Idle); statusMsg = "Holding at home"; }
+        // At home. OneWay holds here; Continuous and a still-running OneTrip (whose origin is the
+        // dest) load and set out again toward the destination.
+        if (runMode == RunMode.OneWay) { operating = false; SwitchPhase(PhaseId.Idle); statusMsg = "Holding at home"; }
         else { SwitchPhase(PhaseId.Loading); phaseTimer = 0; }
     }
 }
@@ -3849,6 +3871,7 @@ void LoadState()
         int pv = ini.Get("state", "phase").ToInt32(-1);
         phase = (pv >= 0 && pv <= (int)PhaseId.Faulted) ? (PhaseId)pv : PhaseId.Idle;
         leg.Outbound = ini.Get("state", "outbound").ToBoolean(true);
+        tripStartHome = ini.Get("state", "tripStartHome").ToBoolean(true);
     }
     else
     {
