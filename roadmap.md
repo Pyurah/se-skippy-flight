@@ -19,7 +19,11 @@ faithful copy of that script and is refactored onto a phase-object architecture.
   flying one leg home and stopping. **0.18.0 makes the ETA phase-aware** — it times each remaining
   segment at the governor it will actually fly (climb/cruise/descent cap ∧ velocity-profile ceiling)
   instead of dividing distance by instantaneous speed, so the countdown is steady and honest.
-- **Version:** ship 0.18.0 / tower 0.13.0 (ship 0.14.0 — **TELEM instrument screen restored** with a
+  **0.18.1 fixes an ETA that read ~10× high** — the segment-walking estimate mis-timed straights at
+  their corner/arrival speed; replaced with remaining distance ÷ the current phase governor.
+  **0.18.2 fixes a beeline-for-home on service terminal retrieval** — `TickIdle` no longer
+  auto-departs when the ship is not docked; requires an explicit START.
+- **Version:** ship 0.18.2 / tower 0.13.0 (ship 0.14.0 — **TELEM instrument screen restored** with a
   new speed-derate breakdown line, which surfaced and fixed a cruise **heading-align derate** that
   capped straight-leg speed ~10% below `cruiseSpeed`; see the note after the Slice i summary. Slice i delivered — **tower-relayed pad paths + holding
   zones**, and a **script split**: setup tooling moved out of SkippyFlight into a new SkippyTower **teach

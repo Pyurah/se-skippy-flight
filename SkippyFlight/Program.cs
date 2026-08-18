@@ -90,7 +90,7 @@ namespace IngameScript
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.18.0";
+const string VERSION = "0.18.2";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip that ENDS
@@ -526,7 +526,6 @@ const double BOUNDARY_CONFIRM_SEC = 2.0;  // s the gravity boundary must hold be
 const double CLIMB_MIN_DIST = 100;        // m from the leg start before a "leveled off" reading can end a PlanetLocal Climb (guards the initial horizontal accel; also lets a flat hop hand straight to Cruise)
 const double LEVEL_RATE = 0.75;           // m/s: |sea-level climb rate| below this counts as leveled off (Climb -> Cruise)
 const double DESCENT_RATE = 1.5;          // m/s: sea-level sink rate beyond this counts as descending to the dock (Cruise -> Descent)
-const double ETA_SLOPE_EPS = 0.05;        // grade (rise/run) a remaining leg segment must exceed to be scored as climb/descent (below it, cruise) when estimating the phase-aware ETA
 
 // ---- Route-end matching ----------------------------------------------------
 // A start/depart is only dispatched when the ship is parked AT a recorded route
@@ -1073,7 +1072,16 @@ void TickIdle()
         }
         SwitchPhase(AtHomeEnd() ? PhaseId.Loading : PhaseId.Unloading);
     }
-    else { leg.Outbound = false; SwitchPhase(PhaseId.Cruise); }
+    else
+    {
+        // Not docked and operating: the ship was placed at an unknown position (e.g.
+        // retrieved from a service terminal) with a stale operating=true in Custom Data.
+        // Auto-departing from here beelined the ship into obstacles. Require an explicit
+        // START from the operator instead; they can START from here to cruise home, or
+        // dock at home/dest first and then START for the normal loading path.
+        operating = false;
+        statusMsg = "Idle: not docked - issue START or dock at home/dest first";
+    }
 }
 
 void TickLoading()
@@ -2957,107 +2965,25 @@ string FormatEta()
     return (sec / 60).ToString("00") + ":" + (sec % 60).ToString("00");
 }
 
-// Phase-aware ETA [s] along the rest of the current leg, or -1 if not estimable.
-// Rather than dist / instantaneous-speed (which lurches while the ship is accelerating
-// or heading-derated, and pretends the whole trip runs at the current governor), this
-// walks the remaining waypoints and times each segment at the GOVERNOR it will fly:
-// climbSpeed / cruiseSpeed / descentSpeed (or dockSpeed on a tower interior thread).
+// ETA [s] to the end of the current leg, or -1 if not estimable. Remaining distance
+// divided by the governor the ship holds RIGHT NOW (CruiseCap = climbSpeed while
+// Climbing, cruiseSpeed while Cruising, descentSpeed while Descending, dockSpeed on an
+// interior thread). This is phase-cap-aware by construction and, because the controller
+// flies each leg at that governor until the final brake, it tracks real time closely.
 //
-// It deliberately does NOT time segments at legVmax. The controller flies each segment
-// at min(governor, brakingCurve), i.e. it stays at the governor for the whole segment
-// and only sheds speed in the last brake-length before a corner or the dock - so
-// legVmax (the low speed AT a cornered waypoint) is NOT the segment's average speed.
-// Timing a long straight at the corner speed it ends on over-counted by ~10x and made
-// the readout collapse as the ship flew through at full cruise. Corner dips are brief
-// and second-order; the one slowdown that always happens - braking to a stop at the
-// final stand-off - is added explicitly at the end.
-//
-// Which governor a segment gets is read from the altitude trend along the path (the
-// same signal the phase machine switches on): the leading uphill run out of the dock is
-// Climb, the trailing downhill run into the far dock is Descent, the level middle is
-// Cruise. So during a climb the estimate already credits the faster cruise leg ahead
-// instead of extrapolating the climb cap over the whole distance.
+// It is deliberately simple. An earlier build tried to time each waypoint segment at its
+// own legVmax; because legVmax is the LOW corner/arrival speed a segment ENDS on - not
+// the speed the ship holds across it - a long straight into a corner was timed ~10x too
+// slow and the readout collapsed as the ship flew through at full cruise. Dividing by
+// the single active governor avoids that entirely. It reads a touch high during the
+// climb-out (it applies the climb cap to the whole remainder, then drops when Cruise
+// takes over) - honest, and far better than being 10x wrong.
 int EtaSeconds()
 {
     if (rc == null || !cruiseArmed || legWps.Count == 0) return -1;
-    int n = legWps.Count;
-    if (cruiseIdx >= n) return -1;
-
-    Vector3D pos = rc.GetPosition();
-    int rem = n - cruiseIdx;                 // segments ahead: pos->legWps[cruiseIdx]->...->legWps[n-1]
-
-    // Up axis for the climb/descent split. In space (no gravity) there is no climb-out
-    // or descent, so every segment is scored as cruise.
-    Vector3D grav = rc.GetNaturalGravity();
-    bool onPlanet = grav.LengthSquared() > 1e-6;
-    Vector3D up = onPlanet ? -Vector3D.Normalize(grav) : Vector3D.Zero;
-
-    // Points P[0]=pos, P[k]=legWps[cruiseIdx+k-1]; altitude relative to the ship now.
-    // Segment k (1..rem) runs P[k-1]->P[k].
-    double[] alt = new double[rem + 1];
-    alt[0] = 0;
-    for (int k = 1; k <= rem; k++)
-        alt[k] = onPlanet ? Vector3D.Dot(legWps[cruiseIdx + k - 1] - pos, up) : 0;
-
-    // Climb region: the leading uphill run, but only while we are still Climbing (once in
-    // Cruise/Descent the climb-out is behind us). climbEnd is the first segment NOT in it.
-    int climbEnd = 1;
-    if (phase == PhaseId.Climb && onPlanet)
-    {
-        while (climbEnd <= rem)
-        {
-            double segLen = SegLen(pos, climbEnd);
-            if (alt[climbEnd] - alt[climbEnd - 1] > ETA_SLOPE_EPS * segLen) climbEnd++;
-            else break;
-        }
-    }
-
-    // Descent region: the trailing downhill run into the far dock. descentStart is the
-    // first segment in it. A leg that never enters a well (Ascent / space) has none;
-    // once we are physically Descending, the whole remainder is the descent.
-    int descentStart = rem + 1;
-    bool legDescends = onPlanet && (legScenario == Scenario.PlanetLocal || legScenario == Scenario.Descent);
-    if (phase == PhaseId.Descent) descentStart = 1;
-    else if (legDescends)
-    {
-        int s = rem;
-        while (s >= 1)
-        {
-            double segLen = SegLen(pos, s);
-            if (alt[s - 1] - alt[s] > ETA_SLOPE_EPS * segLen) s--;
-            else break;
-        }
-        descentStart = s + 1;
-    }
-    if (climbEnd > descentStart) climbEnd = descentStart;   // no overlap; the descent (nearer the dock) wins
-
-    double seconds = 0, lastGov = cruiseSpeed;
-    for (int k = 1; k <= rem; k++)
-    {
-        double segLen = SegLen(pos, k);
-        if (segLen < 1e-6) continue;
-
-        double gov = interior ? dockSpeed
-                   : k < climbEnd ? climbSpeed
-                   : k >= descentStart ? descentSpeed
-                   : cruiseSpeed;
-        gov = Math.Max(gov, 0.5);
-        seconds += segLen / gov;   // flown at the governor; brief corner dips are ignored
-        lastGov = gov;
-    }
-    // Terminal brake-to-stop at the final stand-off: decelerating from the arrival
-    // governor to ~0 costs ~v/(2a) more than cruising that last brake-length would.
-    if (cruiseAccel > 1e-3) seconds += lastGov / (2.0 * cruiseAccel);
-
-    return (int)seconds;
-}
-
-// Length of remaining segment k: P[0]=current position, P[k]=legWps[cruiseIdx+k-1].
-double SegLen(Vector3D pos, int k)
-{
-    Vector3D a = k == 1 ? pos : legWps[cruiseIdx + k - 2];
-    Vector3D b = legWps[cruiseIdx + k - 1];
-    return Vector3D.Distance(a, b);
+    if (cruiseIdx >= legWps.Count) return -1;
+    double v = Math.Max(CruiseCap(), 1.0);
+    return (int)(RemainingDistance() / v);
 }
 
 // Remaining distance along the current leg: ship -> current waypoint, then each

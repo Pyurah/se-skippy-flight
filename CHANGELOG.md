@@ -36,6 +36,32 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.18.2] - 2026-08-17
+
+### Fixed
+- **Script beelined for home when ship was retrieved from a service terminal.** When the ship
+  was stored with `operating = true` in Custom Data (either because it was stored mid-run, or
+  because the storage system removed the grid before the game had a chance to call `Save()` after
+  STOP), the first tick after recompile restored `operating = true` + `phase = Idle`, and `TickIdle`
+  immediately switched to Cruise heading home — without the operator issuing any command. Fixed by
+  removing the auto-depart from the Idle not-docked path: the script now sets `operating = false`
+  and shows `"Idle: not docked — issue START or dock at home/dest first"`, requiring an explicit
+  operator action. The normal START-while-flying path is unaffected (START switches directly to
+  Cruise from the START handler, never through TickIdle).
+
+## [0.18.1] - 2026-08-17
+
+### Fixed
+- **ETA was reading ~10× too high (e.g. 60:00 for a 6-minute, 73 km leg at 200 m/s).** The 0.18.0
+  segment-walking estimate timed each waypoint segment at its `legVmax` — but `legVmax` is the low
+  corner/arrival speed a segment *ends* on, not the speed the ship holds *across* it (the controller
+  flies each leg at the governor and only brakes in the last stretch). A long straight into a corner
+  was therefore counted at the corner speed, massively over-estimating, and the readout collapsed as
+  the ship flew through at full cruise. Replaced with a simple, robust estimate: remaining distance ÷
+  the current phase governor (`CruiseCap()` — climbSpeed / cruiseSpeed / descentSpeed, or dockSpeed on
+  an interior thread). Still phase-cap-aware, no noise, and can't produce a 10× error. The
+  segment-walking code and the `ETA_SLOPE_EPS` constant are removed.
+
 ## [0.18.0] - 2026-08-16
 
 ### Changed
