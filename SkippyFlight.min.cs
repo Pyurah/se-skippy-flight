@@ -3,7 +3,7 @@
 // the deployed script by hand. Source of truth: SkippyFlight/Program.cs. Full docs in
 // README.md / CHANGELOG.md.
 // 
-const string A="0.18.2";enum E{B,C,D}enum J{F,G,H,I}struct R{public Vector3D K,L,M,N;public long O;public double P,Q;}
+const string A="0.19.0";enum E{B,C,D}enum J{F,G,H,I}struct R{public Vector3D K,L,M,N;public long O;public double P,Q;}
 enum f{S,T,U,V,W,X,Y,Z,a,b,c,d,e}struct h{public bool g;}enum l{i,j,Z,k}abstract class t{public abstract f m{get;}public
 abstract bool n{get;}public abstract string o{get;}public virtual void q(Program p){}public abstract void r(Program p);public
 virtual void s(Program p){}}class v:t{public override f m{get{return f.S;}}public override bool n{get{return false;}}public
@@ -272,43 +272,45 @@ return;ŉ.SetAutoPilotEnabled(false);ŉ.ClearWaypoints();Ƕ=false;}string ʯ(){i
 ToString("00")+":"+(ɿ%60).ToString("00");}int ʮ(){if(ŉ==null||!Ƕ||ĵ.Count==0)return-1;if(ķ>=ĵ.Count)return-1;double ɝ=Math.Max(ǹ
 (),1.0);return(int)(ʰ()/ɝ);}double ʰ(){if(ŉ==null||!Ƕ||ĵ.Count==0)return 0;if(ķ>=ĵ.Count)return 0;double ȉ=Vector3D.
 Distance(ŉ.GetPosition(),ĵ[ķ]);for(int ȍ=ķ;ȍ<ĵ.Count-1;ȍ++)ȉ+=Vector3D.Distance(ĵ[ȍ],ĵ[ȍ+1]);return ȉ;}int ʱ(){switch(Ĺ){case ĸ:
-return 6;case ń:return 5;case Ņ:return 6;case ņ:return 8;case Ň:return Ĩ.Count+1;default:return 1;}}void ƫ(int ƻ){if(û){ʲ(ƻ);
+return 6;case ń:return 5;case Ņ:return 8;case ņ:return 8;case Ň:return Ĩ.Count+1;default:return 1;}}void ƫ(int ƻ){if(û){ʲ(ƻ);
 return;}int Ƶ=ʱ();ĺ=((ĺ+ƻ)%Ƶ+Ƶ)%Ƶ;}void Ƭ(){if(û){ʳ();û=false;return;}if(Ĺ==ĸ){switch(ĺ){case 0:Ə(í?"STOP":"START");break;case
 1:ʴ();break;case 2:Ə("DEPART");break;case 3:Ə("HOME");break;case 4:Ĺ=ń;ĺ=0;break;case 5:Ĺ=Ņ;ĺ=0;break;}}else if(Ĺ==ń){
 switch(ĺ){case 0:Ɲ();break;case 1:ƞ();break;case 2:ƨ();å="Route cleared";break;case 3:Ĺ=Ň;ĺ=0;break;case 4:Ĺ=ĸ;ĺ=4;break;}}
 else if(Ĺ==Ň){if(ĺ<Ĩ.Count){if(í)å="STOP before switching routes";else Ʃ(Ĩ[ĺ]);}else{Ĺ=ń;ĺ=3;}}else if(Ĺ==Ņ){switch(ĺ){case
-0:ʵ(ü);break;case 1:ʵ(ÿ);break;case 2:ʵ(ā/1000.0);break;case 3:ʵ(Ă);break;case 4:Ĺ=ņ;ĺ=0;break;case 5:Ĺ=ĸ;ĺ=5;break;}}
-else if(Ĺ==ņ){switch(ĺ){case 0:ʶ(true);break;case 1:ʶ(false);break;case 2:ʵ(Ą);break;case 3:ʵ(ą);break;case 4:ʵ(Ć);break;
-case 5:ʵ(ć);break;case 6:è=!è;Ư("useTower",è?"auto":"off");å="Tower = "+(è?"Auto":"Off");break;case 7:Ĺ=Ņ;ĺ=4;break;}}}void
-ƭ(){if(û){û=false;å="Edit cancelled";return;}if(Ĺ==ņ){Ĺ=Ņ;ĺ=4;}else if(Ĺ==Ň){Ĺ=ń;ĺ=3;}else if(Ĺ!=ĸ){Ĺ=ĸ;ĺ=0;}}void ʴ(){Ø=
-Ø==E.B?E.C:Ø==E.C?E.D:E.B;string ʄ=Ø==E.C?"ONETRIP":Ø==E.D?"ONEWAY":"CONTINUOUS";Ư("runMode",ʄ);å="Mode = "+ƥ(Ø);}void ʶ(
-bool ʷ){J ư=ʷ?Ù:Ú;ư=ư==J.F?J.G:ư==J.G?J.H:ư==J.H?J.I:J.F;if(ʷ)Ù=ư;else Ú=ư;Ư(ʷ?"homeTrigger":"destTrigger",Ʊ(ư));å=(ʷ?"Home"
-:"Dest")+" trigger = "+Ʊ(ư);}void ʵ(double ɝ){û=true;Ģ=ɝ;}double ʸ(){if(Ĺ==Ņ)switch(ĺ){case 0:return 5;case 1:return 0.5;
-case 2:return 1;case 3:return 5;}if(Ĺ==ņ)return 5;return 1;}void ʲ(int ƻ){Ģ=Math.Round(Ģ+ƻ*ʸ(),2);}void ʳ(){if(Ĺ==Ņ)switch(ĺ
-){case 0:ü=(float)ȵ(Ģ,5,1000);Ư("cruiseSpeed",ü);break;case 1:ÿ=(float)ȵ(Ģ,0.5,20);Ư("dockSpeed",ÿ);break;case 2:ā=ȵ(Ģ,0,
-100000)*1000.0;Ư("maxMassKg",ā);break;case 3:Ă=ȵ(Ģ,0,100);Ư("departFill",Ă);break;}else if(Ĺ==ņ)switch(ĺ){case 2:Ą=ȵ(Ģ,0,3600)
-;Ư("dwellSec",Ą);break;case 3:ą=ȵ(Ģ,0,100);Ư("minHydrogenPct",ą);break;case 4:Ć=ȵ(Ģ,0,100);Ư("minBatteryPct",Ć);break;
-case 5:ć=ȵ(Ģ,0,200);Ư("fuelMarginPct",ć);break;}å="Saved";}double ȵ(double ɝ,double ʹ,double ʺ){return ɝ<ʹ?ʹ:ɝ>ʺ?ʺ:ɝ;}void Ư
-(string ʻ,object ʼ){var ƌ=new MyIni();ƌ.TryParse(Me.CustomData);ƌ.Set("sf",ʻ,ʼ.ToString());Me.CustomData=ƌ.ToString();}
-List<string>ʾ(){var ɋ=new List<string>();if(Ĺ==ĸ){ɋ.Add(í?"Stop":"Start");ɋ.Add("Mode: "+ƥ(Ø));ɋ.Add("Depart Now");ɋ.Add(
-"Go Home");ɋ.Add("Record >>");ɋ.Add("Settings >>");}else if(Ĺ==ń){ɋ.Add("Record Home");ɋ.Add("Record Dest");ɋ.Add("Clear Route");
-ɋ.Add("Routes >>");ɋ.Add("<< Back");}else if(Ĺ==Ň){for(int ȍ=0;ȍ<Ĩ.Count;ȍ++)ɋ.Add((Ĩ[ȍ]==ã?"* ":"  ")+Ĩ[ȍ]);ɋ.Add(
-"<< Back");}else if(Ĺ==Ņ){ɋ.Add("Cruise: "+ʽ(0,ü)+" m/s");ɋ.Add("Dock: "+ʽ(1,ÿ)+" m/s");ɋ.Add("MaxMass: "+ʽ(2,ā/1000.0)+"t"+(ā<=0
-?" off":""));ɋ.Add("Fill: "+ʽ(3,Ă)+" %");ɋ.Add("Depart >>");ɋ.Add("<< Back");}else if(Ĺ==ņ){ɋ.Add("Home trig: "+Ʊ(Ù));ɋ.
-Add("Dest trig: "+Ʊ(Ú));ɋ.Add("Dwell: "+ʽ(2,Ą)+" s");ɋ.Add("Min H2: "+ʽ(3,ą)+" %");ɋ.Add("Min Bat: "+ʽ(4,Ć)+" %");ɋ.Add(
-"Margin: "+ʽ(5,ć)+" %");ɋ.Add("Tower: "+(è?"Auto":"Off"));ɋ.Add("<< Back");}return ɋ;}string ʽ(int ʁ,double ʿ){bool ˀ=û&&ĺ==ʁ;
-double ɝ=ˀ?Ģ:ʿ;string ʄ=ɝ.ToString("0.##");return ˀ?"["+ʄ+"]":ʄ;}string ˁ(){return Ĺ==ń?"RECORD":Ĺ==Ņ?"SETTINGS":Ĺ==ņ?"DEPART"
-:Ĺ==Ň?"ROUTES":"MAIN";}void Ɛ(){var ˆ=new Dictionary<string,string>();foreach(var ư in ő){string ˇ;if(!ˆ.TryGetValue(ư.ō,
-out ˇ)){ˇ=ˈ(ˉ(ư.ō),ƃ);ˆ[ư.ō]=ˇ;}ˊ(ư,ˇ);}Echo(ˈ(ˉ(Ŀ),ƃ));}string ˉ(string ɷ){switch(ɷ){case ŀ:return ˋ();case Ł:return ˌ();
-case ł:return ˍ();case Ń:return ˎ();default:return ˏ()+ˋ();}}string ˎ(){var ː=new StringBuilder("-- Telem --\n");if(ŉ==null)
-return ː.Append("no rc").ToString();Vector3D ȥ=ŉ.GetShipVelocities().LinearVelocity;Vector3D Ǖ=ŉ.GetNaturalGravity();double Ȅ=
-Ǖ.Length();ː.Append(ˑ()+(í?" [RUN]":" [STOP]")+" t"+µ.ToString("0")+"s\n");ː.Append("Spd "+ŉ.GetShipSpeed().ToString(
-"0.0"));if(Ƕ&&ķ<Ķ.Count)ː.Append("/"+Math.Min(ǹ(),Ķ[ķ]).ToString("0")+"cap");ː.Append("\nDrt a"+ě.ToString("0.00")+" v"+Ĝ.
-ToString("0.00")+" br"+ĝ.ToString("0")+" c"+Ğ.ToString("0")+"\n");if(Ȅ>1e-3)ː.Append("VS "+ȥ.Dot(-Ǖ/Ȅ).ToString("+0.0;-0.0")+
-" Grav "+(Ȅ/9.81).ToString("0.00")+"g\n");else ː.Append("VS (space)\n");double ˠ;if(ŉ.TryGetPlanetElevation(MyPlanetElevation.
-Surface,out ˠ))ː.Append("Alt "+ˠ.ToString("0")+"m\n");if(Ƕ&&ĵ.Count>0)ː.Append("WP "+(ķ+1)+"/"+ĵ.Count+" "+(ʰ()/1000.0).
-ToString("0.0")+"km\n");ː.Append("Att "+(ğ*57.2958).ToString("0.0")+"deg\n");double ʧ=ʣ(),ʨ=ʤ();ː.Append("H2 "+(ʧ<0?"n/a":ʧ.
-ToString("0")+"%")+" Bat "+(ʨ<0?"n/a":ʨ.ToString("0")+"%"));return ː.ToString();}string ˡ(){return Û+" v"+A+" "+ˑ()+(í?" [RUN]":
+0:ʵ(ü);break;case 1:ʵ(ý);break;case 2:ʵ(þ);break;case 3:ʵ(ÿ);break;case 4:ʵ(ā/1000.0);break;case 5:ʵ(Ă);break;case 6:Ĺ=ņ;
+ĺ=0;break;case 7:Ĺ=ĸ;ĺ=5;break;}}else if(Ĺ==ņ){switch(ĺ){case 0:ʶ(true);break;case 1:ʶ(false);break;case 2:ʵ(Ą);break;
+case 3:ʵ(ą);break;case 4:ʵ(Ć);break;case 5:ʵ(ć);break;case 6:è=!è;Ư("useTower",è?"auto":"off");å="Tower = "+(è?"Auto":"Off")
+;break;case 7:Ĺ=Ņ;ĺ=6;break;}}}void ƭ(){if(û){û=false;å="Edit cancelled";return;}if(Ĺ==ņ){Ĺ=Ņ;ĺ=6;}else if(Ĺ==Ň){Ĺ=ń;ĺ=3;
+}else if(Ĺ!=ĸ){Ĺ=ĸ;ĺ=0;}}void ʴ(){Ø=Ø==E.B?E.C:Ø==E.C?E.D:E.B;string ʄ=Ø==E.C?"ONETRIP":Ø==E.D?"ONEWAY":"CONTINUOUS";Ư(
+"runMode",ʄ);å="Mode = "+ƥ(Ø);}void ʶ(bool ʷ){J ư=ʷ?Ù:Ú;ư=ư==J.F?J.G:ư==J.G?J.H:ư==J.H?J.I:J.F;if(ʷ)Ù=ư;else Ú=ư;Ư(ʷ?
+"homeTrigger":"destTrigger",Ʊ(ư));å=(ʷ?"Home":"Dest")+" trigger = "+Ʊ(ư);}void ʵ(double ɝ){û=true;Ģ=ɝ;}double ʸ(){if(Ĺ==Ņ)switch(ĺ){
+case 0:return 5;case 1:return 5;case 2:return 5;case 3:return 0.5;case 4:return 1;case 5:return 5;}if(Ĺ==ņ)return 5;return 1
+;}void ʲ(int ƻ){Ģ=Math.Round(Ģ-ƻ*ʸ(),2);}void ʳ(){if(Ĺ==Ņ)switch(ĺ){case 0:ü=(float)ȵ(Ģ,5,1000);Ư("cruiseSpeed",ü);break;
+case 1:ý=(float)ȵ(Ģ,5,ü);Ư("climbSpeed",ý);break;case 2:þ=(float)ȵ(Ģ,5,ü);Ư("descentSpeed",þ);break;case 3:ÿ=(float)ȵ(Ģ,0.5,
+20);Ư("dockSpeed",ÿ);break;case 4:ā=ȵ(Ģ,0,100000)*1000.0;Ư("maxMassKg",ā);break;case 5:Ă=ȵ(Ģ,0,100);Ư("departFill",Ă);
+break;}else if(Ĺ==ņ)switch(ĺ){case 2:Ą=ȵ(Ģ,0,3600);Ư("dwellSec",Ą);break;case 3:ą=ȵ(Ģ,0,100);Ư("minHydrogenPct",ą);break;case
+4:Ć=ȵ(Ģ,0,100);Ư("minBatteryPct",Ć);break;case 5:ć=ȵ(Ģ,0,200);Ư("fuelMarginPct",ć);break;}å="Saved";}double ȵ(double ɝ,
+double ʹ,double ʺ){return ɝ<ʹ?ʹ:ɝ>ʺ?ʺ:ɝ;}void Ư(string ʻ,object ʼ){var ƌ=new MyIni();ƌ.TryParse(Me.CustomData);ƌ.Set("sf",ʻ,ʼ.
+ToString());Me.CustomData=ƌ.ToString();}List<string>ʾ(){var ɋ=new List<string>();if(Ĺ==ĸ){ɋ.Add(í?"Stop":"Start");ɋ.Add("Mode: "
++ƥ(Ø));ɋ.Add("Depart Now");ɋ.Add("Go Home");ɋ.Add("Record >>");ɋ.Add("Settings >>");}else if(Ĺ==ń){ɋ.Add("Record Home");ɋ
+.Add("Record Dest");ɋ.Add("Clear Route");ɋ.Add("Routes >>");ɋ.Add("<< Back");}else if(Ĺ==Ň){for(int ȍ=0;ȍ<Ĩ.Count;ȍ++)ɋ.
+Add((Ĩ[ȍ]==ã?"* ":"  ")+Ĩ[ȍ]);ɋ.Add("<< Back");}else if(Ĺ==Ņ){ɋ.Add("Cruise: "+ʽ(0,ü)+" m/s");ɋ.Add("Climb: "+ʽ(1,ý)+" m/s"
+);ɋ.Add("Descend: "+ʽ(2,þ)+" m/s");ɋ.Add("Dock: "+ʽ(3,ÿ)+" m/s");ɋ.Add("MaxMass: "+ʽ(4,ā/1000.0)+"t"+(ā<=0?" off":""));ɋ.
+Add("Fill: "+ʽ(5,Ă)+" %");ɋ.Add("Depart >>");ɋ.Add("<< Back");}else if(Ĺ==ņ){ɋ.Add("Home trig: "+Ʊ(Ù));ɋ.Add("Dest trig: "+
+Ʊ(Ú));ɋ.Add("Dwell: "+ʽ(2,Ą)+" s");ɋ.Add("Min H2: "+ʽ(3,ą)+" %");ɋ.Add("Min Bat: "+ʽ(4,Ć)+" %");ɋ.Add("Margin: "+ʽ(5,ć)+
+" %");ɋ.Add("Tower: "+(è?"Auto":"Off"));ɋ.Add("<< Back");}return ɋ;}string ʽ(int ʁ,double ʿ){bool ˀ=û&&ĺ==ʁ;double ɝ=ˀ?Ģ:ʿ;
+string ʄ=ɝ.ToString("0.##");return ˀ?"["+ʄ+"]":ʄ;}string ˁ(){return Ĺ==ń?"RECORD":Ĺ==Ņ?"SETTINGS":Ĺ==ņ?"DEPART":Ĺ==Ň?"ROUTES":
+"MAIN";}void Ɛ(){var ˆ=new Dictionary<string,string>();foreach(var ư in ő){string ˇ;if(!ˆ.TryGetValue(ư.ō,out ˇ)){ˇ=ˈ(ˉ(ư.ō),ƃ
+);ˆ[ư.ō]=ˇ;}ˊ(ư,ˇ);}Echo(ˈ(ˉ(Ŀ),ƃ));}string ˉ(string ɷ){switch(ɷ){case ŀ:return ˋ();case Ł:return ˌ();case ł:return ˍ();
+case Ń:return ˎ();default:return ˏ()+ˋ();}}string ˎ(){var ː=new StringBuilder("-- Telem --\n");if(ŉ==null)return ː.Append(
+"no rc").ToString();Vector3D ȥ=ŉ.GetShipVelocities().LinearVelocity;Vector3D Ǖ=ŉ.GetNaturalGravity();double Ȅ=Ǖ.Length();ː.
+Append(ˑ()+(í?" [RUN]":" [STOP]")+" t"+µ.ToString("0")+"s\n");ː.Append("Spd "+ŉ.GetShipSpeed().ToString("0.0"));if(Ƕ&&ķ<Ķ.
+Count)ː.Append("/"+Math.Min(ǹ(),Ķ[ķ]).ToString("0")+"cap");ː.Append("\nDrt a"+ě.ToString("0.00")+" v"+Ĝ.ToString("0.00")+
+" br"+ĝ.ToString("0")+" c"+Ğ.ToString("0")+"\n");if(Ȅ>1e-3)ː.Append("VS "+ȥ.Dot(-Ǖ/Ȅ).ToString("+0.0;-0.0")+" Grav "+(Ȅ/9.81)
+.ToString("0.00")+"g\n");else ː.Append("VS (space)\n");double ˠ;if(ŉ.TryGetPlanetElevation(MyPlanetElevation.Surface,out
+ˠ))ː.Append("Alt "+ˠ.ToString("0")+"m\n");if(Ƕ&&ĵ.Count>0)ː.Append("WP "+(ķ+1)+"/"+ĵ.Count+" "+(ʰ()/1000.0).ToString(
+"0.0")+"km\n");ː.Append("Att "+(ğ*57.2958).ToString("0.0")+"deg\n");double ʧ=ʣ(),ʨ=ʤ();ː.Append("H2 "+(ʧ<0?"n/a":ʧ.ToString(
+"0")+"%")+" Bat "+(ʨ<0?"n/a":ʨ.ToString("0")+"%"));return ː.ToString();}string ˡ(){return Û+" v"+A+" "+ˑ()+(í?" [RUN]":
 " [STOP]");}string ˏ(){var ː=new StringBuilder();ː.Append(ˡ()).Append('\n');ː.Append("Cargo ").Append(ǆ().ToString("0")).Append(
 "% ").Append((Ǆ()/1000.0).ToString("0")).Append("t ").Append((ŉ!=null?ŉ.GetShipSpeed():0).ToString("0")).Append("m/s\n");ː.
 Append(ê?("Route "+(ã!=""?ã+" ":"")+ĥ.Count+"wp"):"Route: none").Append('\n');if(Ǻ())ː.Append("ETA ").Append(ʯ()).Append(' ').

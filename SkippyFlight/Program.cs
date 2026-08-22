@@ -90,7 +90,7 @@ namespace IngameScript
  * grid-scoping) falls back to accept-any. Version tracked in CHANGELOG.md. Semver.
  *//////////////////////////////////////////////////////////////////////////////
 
-const string VERSION = "0.18.2";
+const string VERSION = "0.19.0";
 
 // ---- States ----------------------------------------------------------------
 // RunMode is the TRIP CYCLE only. Continuous/OneTrip do a full round trip that ENDS
@@ -3008,7 +3008,7 @@ int MenuCount()
     {
         case PAGE_MAIN:     return 6;   // Start/Stop, Run Mode, Depart Now, Go Home, Record, Settings
         case PAGE_RECORD:   return 5;   // Home, Dest, Clear, Routes, Back
-        case PAGE_SETTINGS: return 6;   // Cruise, Dock, MaxMass, DepartFill, Depart page, Back
+        case PAGE_SETTINGS: return 8;   // Cruise, Climb, Descend, Dock, MaxMass, DepartFill, Depart page, Back
         case PAGE_DEPART:   return 8;   // Home trig, Dest trig, Dwell, MinH2, MinBatt, Margin, Tower, Back
         case PAGE_ROUTES:   return routeNames.Count + 1;   // one item per saved route + Back
         default:            return 1;
@@ -3064,11 +3064,13 @@ void MenuApply()
         switch (menuIndex)
         {
             case 0: BeginEdit(cruiseSpeed); break;
-            case 1: BeginEdit(dockSpeed); break;
-            case 2: BeginEdit(maxMassKg / 1000.0); break;   // edit in tonnes
-            case 3: BeginEdit(departFill); break;
-            case 4: menuPage = PAGE_DEPART; menuIndex = 0; break;
-            case 5: menuPage = PAGE_MAIN; menuIndex = 5; break;
+            case 1: BeginEdit(climbSpeed); break;
+            case 2: BeginEdit(descentSpeed); break;
+            case 3: BeginEdit(dockSpeed); break;
+            case 4: BeginEdit(maxMassKg / 1000.0); break;   // edit in tonnes
+            case 5: BeginEdit(departFill); break;
+            case 6: menuPage = PAGE_DEPART; menuIndex = 0; break;
+            case 7: menuPage = PAGE_MAIN; menuIndex = 5; break;
         }
     }
     else if (menuPage == PAGE_DEPART)
@@ -3082,7 +3084,7 @@ void MenuApply()
             case 4: BeginEdit(minBatteryPct); break;
             case 5: BeginEdit(fuelMarginPct); break;
             case 6: useTower = !useTower; SaveCfg("useTower", useTower ? "auto" : "off"); statusMsg = "Tower = " + (useTower ? "Auto" : "Off"); break;
-            case 7: menuPage = PAGE_SETTINGS; menuIndex = 4; break;
+            case 7: menuPage = PAGE_SETTINGS; menuIndex = 6; break;
         }
     }
 }
@@ -3090,7 +3092,7 @@ void MenuApply()
 void MenuBack()
 {
     if (editing) { editing = false; statusMsg = "Edit cancelled"; return; }
-    if (menuPage == PAGE_DEPART) { menuPage = PAGE_SETTINGS; menuIndex = 4; }
+    if (menuPage == PAGE_DEPART) { menuPage = PAGE_SETTINGS; menuIndex = 6; }
     else if (menuPage == PAGE_ROUTES) { menuPage = PAGE_RECORD; menuIndex = 3; }
     else if (menuPage != PAGE_MAIN) { menuPage = PAGE_MAIN; menuIndex = 0; }
 }
@@ -3127,25 +3129,29 @@ double EditStep()
         switch (menuIndex)
         {
             case 0: return 5;      // cruise m/s
-            case 1: return 0.5;    // dock m/s
-            case 2: return 1;      // max mass tonnes
-            case 3: return 5;      // depart fill %
+            case 1: return 5;      // climb m/s
+            case 2: return 5;      // descent m/s
+            case 3: return 0.5;    // dock m/s
+            case 4: return 1;      // max mass tonnes
+            case 5: return 5;      // depart fill %
         }
     if (menuPage == PAGE_DEPART) return 5;   // dwell s / min H2 % / min batt % / margin %
     return 1;
 }
 
-void AdjustEdit(int dir) { editValue = Math.Round(editValue + dir * EditStep(), 2); }
+void AdjustEdit(int dir) { editValue = Math.Round(editValue - dir * EditStep(), 2); }
 
 void CommitEdit()
 {
     if (menuPage == PAGE_SETTINGS)
         switch (menuIndex)
         {
-            case 0: cruiseSpeed = (float)Clamp(editValue, 5, 1000); SaveCfg("cruiseSpeed", cruiseSpeed); break;
-            case 1: dockSpeed   = (float)Clamp(editValue, 0.5, 20); SaveCfg("dockSpeed", dockSpeed); break;
-            case 2: maxMassKg   = Clamp(editValue, 0, 100000) * 1000.0; SaveCfg("maxMassKg", maxMassKg); break;
-            case 3: departFill  = Clamp(editValue, 0, 100); SaveCfg("departFill", departFill); break;
+            case 0: cruiseSpeed  = (float)Clamp(editValue, 5, 1000); SaveCfg("cruiseSpeed", cruiseSpeed); break;
+            case 1: climbSpeed   = (float)Clamp(editValue, 5, cruiseSpeed); SaveCfg("climbSpeed", climbSpeed); break;
+            case 2: descentSpeed = (float)Clamp(editValue, 5, cruiseSpeed); SaveCfg("descentSpeed", descentSpeed); break;
+            case 3: dockSpeed    = (float)Clamp(editValue, 0.5, 20); SaveCfg("dockSpeed", dockSpeed); break;
+            case 4: maxMassKg    = Clamp(editValue, 0, 100000) * 1000.0; SaveCfg("maxMassKg", maxMassKg); break;
+            case 5: departFill   = Clamp(editValue, 0, 100); SaveCfg("departFill", departFill); break;
         }
     else if (menuPage == PAGE_DEPART)
         switch (menuIndex)
@@ -3199,9 +3205,11 @@ List<string> MenuLabels()
     else if (menuPage == PAGE_SETTINGS)
     {
         l.Add("Cruise: " + FmtSetting(0, cruiseSpeed) + " m/s");
-        l.Add("Dock: " + FmtSetting(1, dockSpeed) + " m/s");
-        l.Add("MaxMass: " + FmtSetting(2, maxMassKg / 1000.0) + "t" + (maxMassKg <= 0 ? " off" : ""));
-        l.Add("Fill: " + FmtSetting(3, departFill) + " %");
+        l.Add("Climb: " + FmtSetting(1, climbSpeed) + " m/s");
+        l.Add("Descend: " + FmtSetting(2, descentSpeed) + " m/s");
+        l.Add("Dock: " + FmtSetting(3, dockSpeed) + " m/s");
+        l.Add("MaxMass: " + FmtSetting(4, maxMassKg / 1000.0) + "t" + (maxMassKg <= 0 ? " off" : ""));
+        l.Add("Fill: " + FmtSetting(5, departFill) + " %");
         l.Add("Depart >>");
         l.Add("<< Back");
     }

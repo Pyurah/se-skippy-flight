@@ -36,6 +36,14 @@ real toolchain instead of the old comment-stripper. Both scripts are now proper 
 - Retired `tools/build-min.py` (the Python comment-stripper + brace-balance gate) — moved to
   `tools/legacy/` alongside the one-time `wrap-mdk.py` migration helper. Superseded by the MDK2 packager.
 
+## [0.19.0] - 2026-08-22
+
+### Added
+- **Climb and descent speed settings in the LCD menu.** `Climb` and `Descend` entries now appear
+  in the Settings page (after Cruise, before Dock), allowing climb and descent speed caps to be
+  configured from the in-game toolbar buttons without editing Custom Data directly. Values are
+  clamped to `[5, cruiseSpeed]` on commit, matching the Custom Data load behavior.
+
 ## [0.18.2] - 2026-08-17
 
 ### Fixed
